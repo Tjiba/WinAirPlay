@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Build output
+dist/
+build/
+*.spec
+WinAirPlay.ico
+
+# Runtime log
+winairplay.log
+
+# Claude Code internals
+docs/
+.claude/
+
+# IDE
+.vscode/
+.idea/
