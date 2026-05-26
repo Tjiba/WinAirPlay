@@ -1,3 +1,4 @@
+import ipaddress
 import socket
 import threading
 from dataclasses import dataclass
@@ -77,7 +78,9 @@ class DeviceDiscovery:
             return
         if not info.addresses:
             return
-        host = socket.inet_ntoa(info.addresses[0])
+        addrs = [socket.inet_ntoa(a) for a in info.addresses]
+        non_ll = [a for a in addrs if not ipaddress.ip_address(a).is_link_local]
+        host = non_ll[0] if non_ll else addrs[0]
         port = info.port
         raw = name.replace("." + service_type.rstrip("."), "").rstrip(".")
         display_name = _parse_service_name(raw)
