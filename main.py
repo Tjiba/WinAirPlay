@@ -257,9 +257,9 @@ class WinAirPlay:
                     with self._lock:
                         for name in dead:
                             if self._raop_clients.get(name) is not None:
-                                logging.warning("[AudioLoop] %s stream ended", name)
+                                logging.warning("[AudioLoop] %s stream ended — will reconnect", name)
                                 self._raop_clients.pop(name, None)
-                                self._active_devices.pop(name, None)
+                                # Keep in _active_devices so reconnect loop picks it up
                     self._refresh_menu()
 
                 with self._lock:
