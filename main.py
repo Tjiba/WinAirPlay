@@ -26,7 +26,7 @@ logging.basicConfig(
 
 RECONNECT_INTERVAL = 5
 BUFFER_DURATION    = 2.0
-CHUNK_FRAMES       = 256
+CHUNK_FRAMES       = 1024
 BYTES_PER_FRAME    = 4   # 2ch × 2 bytes
 DEFAULT_VOLUME     = 50.0
 

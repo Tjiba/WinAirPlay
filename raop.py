@@ -47,12 +47,15 @@ class _StreamFeeder(io.RawIOBase):
         self._header = data
 
     def feed(self, data: bytes) -> None:
-        # Drop the oldest audio chunk rather than building a stale backlog.
-        while self._q.qsize() >= self._MAX_QUEUE_CHUNKS:
-            try:
-                self._q.get_nowait()
-            except queue.Empty:
-                break
+        if self._q.qsize() >= self._MAX_QUEUE_CHUNKS:
+            # Clock drift: flush the whole backlog in one shot (one clean gap)
+            # rather than dropping one chunk at a time (repeated pops).
+            self._remainder = b""
+            while not self._q.empty():
+                try:
+                    self._q.get_nowait()
+                except queue.Empty:
+                    break
         self._q.put(data)
 
     def close_feed(self) -> None:
