@@ -84,6 +84,7 @@ class WinAirPlay:
         self._lock         = threading.Lock()
         self._capture_lock = threading.Lock()  # serializes all capture start/stop
         self._stop_event = threading.Event()
+        self._reconnect_needed = threading.Event()
         self._audio_loop_done = threading.Event()
         self._audio_loop_done.set()  # not running initially
 
@@ -261,6 +262,7 @@ class WinAirPlay:
                                 self._raop_clients.pop(name, None)
                                 # Keep in _active_devices so reconnect loop picks it up
                     self._refresh_menu()
+                    self._reconnect_needed.set()
 
                 with self._lock:
                     if not self._raop_clients:
@@ -271,10 +273,20 @@ class WinAirPlay:
             logging.exception("[AudioLoop] Error")
         finally:
             self._streaming = False
+            # Evict any clients still marked alive — the audio loop died under them
+            # (e.g. capture OSError). Disconnect them so the reconnect loop can
+            # re-establish cleanly; otherwise _alive=True would suppress reconnect.
             with self._lock:
+                stranded = {n: c for n, c in self._raop_clients.items() if c._alive}
+                for n in stranded:
+                    self._raop_clients.pop(n, None)
                 if not self._raop_clients:
                     with self._capture_lock:
                         self._capture.stop()
+            for c in stranded.values():
+                threading.Thread(target=c.disconnect, daemon=True).start()
+            if stranded and not self._stop_event.is_set():
+                self._reconnect_needed.set()
             self._audio_loop_done.set()
             logging.info("[AudioLoop] Stopped")
 
@@ -355,7 +367,8 @@ class WinAirPlay:
 
     def _reconnect_loop(self) -> None:
         while not self._stop_event.is_set():
-            time.sleep(RECONNECT_INTERVAL)
+            self._reconnect_needed.wait(timeout=RECONNECT_INTERVAL)
+            self._reconnect_needed.clear()
             if self._stop_event.is_set():
                 break
 
@@ -384,6 +397,7 @@ class WinAirPlay:
 
     def _quit(self, icon=None, item=None) -> None:
         self._stop_event.set()
+        self._reconnect_needed.set()  # unblock reconnect loop
         self._discovery.stop()
         # Close UI immediately — don't wait for disconnect
         if self._tray:

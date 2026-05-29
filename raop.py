@@ -118,6 +118,10 @@ def _streaming_wav_header(
 class RAOPClient:
     """AirPlay 2 audio sender using pyatv (pair-verify + ALAC/AAC streaming)."""
 
+    # Class-level cache: host → pyatv config.  Avoids the 5-10s mDNS scan on
+    # every reconnect; the first connection scans, subsequent ones connect directly.
+    _config_cache: dict = {}
+
     def __init__(self) -> None:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_thread: Optional[threading.Thread] = None
@@ -216,18 +220,29 @@ class RAOPClient:
         try:
             await self._storage.load()
 
-            logging.info("[PyATV] Scanning for device at %s ...", host)
-            atvs = await pyatv.scan(
-                self._loop, hosts=[host], timeout=10, storage=self._storage
-            )
-            if not atvs:
-                logging.error("[PyATV] No AirPlay device found at %s", host)
-                return
+            conf = RAOPClient._config_cache.get(host)
+            if conf is not None:
+                logging.info("[PyATV] Connecting (cached): %s", conf.name)
+                try:
+                    self._atv = await pyatv.connect(conf, self._loop, storage=self._storage)
+                except Exception as e:
+                    logging.warning("[PyATV] Cached connect failed (%s) — rescanning", e)
+                    RAOPClient._config_cache.pop(host, None)
+                    conf = None
 
-            conf = atvs[0]
-            logging.info("[PyATV] Found: %s (%s)", conf.name, conf.address)
+            if conf is None:
+                logging.info("[PyATV] Scanning for device at %s ...", host)
+                atvs = await pyatv.scan(
+                    self._loop, hosts=[host], timeout=10, storage=self._storage
+                )
+                if not atvs:
+                    logging.error("[PyATV] No AirPlay device found at %s", host)
+                    return
+                conf = atvs[0]
+                RAOPClient._config_cache[host] = conf
+                logging.info("[PyATV] Found: %s (%s)", conf.name, conf.address)
+                self._atv = await pyatv.connect(conf, self._loop, storage=self._storage)
 
-            self._atv = await pyatv.connect(conf, self._loop, storage=self._storage)
             logging.info("[PyATV] Connected — streaming audio to %s", conf.name)
 
             await self._storage.save()
