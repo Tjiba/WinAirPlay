@@ -3,6 +3,7 @@ import logging
 import sys
 import threading
 import time
+from logging.handlers import RotatingFileHandler
 import tkinter as tk
 import winreg
 from typing import Optional, Dict, Set
@@ -19,10 +20,18 @@ from ui import PopupMenu
 _LOG_DIR = os.path.join(os.environ.get("APPDATA", "."), "WinAirPlay")
 os.makedirs(_LOG_DIR, exist_ok=True)
 logging.basicConfig(
-    filename=os.path.join(_LOG_DIR, 'winairplay.log'),
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s %(levelname)s %(message)s',
+    handlers=[RotatingFileHandler(
+        os.path.join(_LOG_DIR, 'winairplay.log'),
+        maxBytes=2_000_000, backupCount=2, encoding='utf-8',
+    )],
 )
+# pyatv's RAOP internals log per audio packet at DEBUG (millions of
+# "Too slow to keep up" lines). Synchronous file writes on the asyncio loop
+# thread add jitter to the real-time audio path and fill the disk — keep them
+# at WARNING.
+logging.getLogger('pyatv').setLevel(logging.WARNING)
 
 RECONNECT_INTERVAL = 5
 BUFFER_DURATION    = 2.0
@@ -218,6 +227,9 @@ class WinAirPlay:
             if self._raop_clients.get(name) is client:
                 self._raop_clients.pop(name, None)
                 self._active_devices.pop(name, None)
+        # A connect that timed out may still have a live asyncio loop trying to
+        # finish the handshake — disconnect it so it can't become a zombie sender.
+        threading.Thread(target=client.disconnect, daemon=True).start()
         self._refresh_menu()
 
     # ------------------------------------------------------------------ audio loop
@@ -255,12 +267,19 @@ class WinAirPlay:
                         dead.append(name)
 
                 if dead:
+                    evicted = []
                     with self._lock:
                         for name in dead:
-                            if self._raop_clients.get(name) is not None:
+                            c = self._raop_clients.get(name)
+                            if c is not None:
                                 logging.warning("[AudioLoop] %s stream ended — will reconnect", name)
                                 self._raop_clients.pop(name, None)
+                                evicted.append(c)
                                 # Keep in _active_devices so reconnect loop picks it up
+                    # Tear each dead client down so its asyncio loop + pyatv
+                    # connection can't linger as a zombie sender to the device.
+                    for c in evicted:
+                        threading.Thread(target=c.disconnect, daemon=True).start()
                     self._refresh_menu()
                     self._reconnect_needed.set()
 
@@ -378,8 +397,15 @@ class WinAirPlay:
                     for name, dev in self._active_devices.items()
                     if name not in self._raop_clients or not self._raop_clients[name]._alive
                 ]
+                stale = []
                 for name, _ in to_reconnect:
-                    self._raop_clients.pop(name, None)
+                    c = self._raop_clients.pop(name, None)
+                    if c is not None:
+                        stale.append(c)
+            # Fully disconnect any stale client before replacing it, so its event
+            # loop never runs alongside the new connection.
+            for c in stale:
+                threading.Thread(target=c.disconnect, daemon=True).start()
 
             for name, device in to_reconnect:
                 if self._stop_event.is_set():

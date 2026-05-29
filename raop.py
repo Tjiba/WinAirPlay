@@ -193,11 +193,22 @@ class RAOPClient:
     def disconnect(self) -> None:
         self._alive = False
         self._ready.set()  # unblock any _audio_loop waiting on _ready
+        loop = self._loop
         if self._feeder:
             self._feeder.close_feed()  # sends EOF → stream_file() returns → finally stops loop
             self._feeder = None
         if self._loop_thread:
             self._loop_thread.join(timeout=8)  # wait for _stream_task finally to stop the loop
+            if self._loop_thread.is_alive() and loop is not None:
+                # pyatv teardown hung past the timeout. Force the event loop to
+                # stop so the thread exits, instead of lingering as a zombie that
+                # keeps heartbeating/streaming to the device.
+                logging.warning("[PyATV] disconnect: loop still alive after 8s — forcing stop")
+                try:
+                    loop.call_soon_threadsafe(loop.stop)
+                except Exception:
+                    pass
+                self._loop_thread.join(timeout=3)
         self._loop_thread = None
         self._loop = None
         self._storage = None
