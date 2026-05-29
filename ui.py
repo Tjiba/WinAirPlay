@@ -49,16 +49,55 @@ _RDW_UPDATENOW   = 0x0100
 
 # ── Win32 helpers ──────────────────────────────────────────────────────────────
 
-def _work_area() -> tuple[int, int, int, int]:
-    class _R(ctypes.Structure):
-        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
-                    ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-    r = _R()
+class _RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", _RECT),
+                ("rcWork", _RECT), ("dwFlags", ctypes.c_ulong)]
+
+
+def _cursor_monitor() -> tuple[tuple, tuple]:
+    """Return (monitor_rect, work_rect) for the monitor under the cursor.
+
+    Multi-monitor aware: a tray click leaves the cursor on the right monitor, so
+    we anchor the popup there. rcWork is per-monitor (taskbar-aware on whichever
+    monitor actually has the bar). Falls back to the primary monitor.
+    """
+    user32 = ctypes.windll.user32
     try:
-        ctypes.windll.user32.SystemParametersInfoW(0x30, 0, ctypes.byref(r), 0)
+        # HMONITOR is a HANDLE — restype MUST be c_void_p or it truncates on Win64.
+        user32.MonitorFromPoint.restype = ctypes.c_void_p
+        user32.MonitorFromPoint.argtypes = [_POINT, ctypes.c_ulong]
+        user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_MONITORINFO)]
+        user32.GetCursorPos.argtypes = [ctypes.POINTER(_POINT)]
+
+        pt = _POINT()
+        user32.GetCursorPos(ctypes.byref(pt))
+        hmon = user32.MonitorFromPoint(pt, 2)  # MONITOR_DEFAULTTONEAREST
+        mi = _MONITORINFO()
+        mi.cbSize = ctypes.sizeof(_MONITORINFO)
+        if user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+            m, w = mi.rcMonitor, mi.rcWork
+            return ((m.left, m.top, m.right, m.bottom),
+                    (w.left, w.top, w.right, w.bottom))
     except Exception:
         pass
-    return r.left, r.top, r.right, r.bottom
+    # Fallback: primary monitor via SPI_GETWORKAREA + screen metrics
+    r = _RECT()
+    try:
+        user32.SystemParametersInfoW(0x30, 0, ctypes.byref(r), 0)
+    except Exception:
+        pass
+    sw = user32.GetSystemMetrics(0) or r.right
+    sh = user32.GetSystemMetrics(1) or r.bottom
+    return ((0, 0, sw, sh), (r.left, r.top, r.right or sw, r.bottom or sh))
 
 
 def _dwm_style(hwnd: int) -> None:
@@ -600,22 +639,27 @@ class PopupMenu(tk.Toplevel):
 
     def _place(self) -> None:
         self.update_idletasks()
-        sw = self._tk.winfo_screenwidth()
-        sh = self._tk.winfo_screenheight()
-        wa_left, wa_top, wa_right, wa_bottom = _work_area()
+        (m_left, m_top, m_right, m_bottom), \
+            (wa_left, wa_top, wa_right, wa_bottom) = _cursor_monitor()
         pw = W + 2
         ph = self._inner.winfo_reqheight() + 2
 
-        if wa_top > 0:
+        # Detect the taskbar side by comparing the work area to THIS monitor's
+        # bounds (absolute virtual-desktop coords), so it works on any monitor.
+        if wa_top > m_top:              # taskbar at top of this monitor
             x, y = wa_right - pw - 8, wa_top + 4
-        elif wa_bottom < sh:
+        elif wa_bottom < m_bottom:      # taskbar at bottom
             x, y = wa_right - pw - 8, wa_bottom - ph - 4
-        elif wa_left > 0:
+        elif wa_left > m_left:          # taskbar at left
             x, y = wa_left + 4, wa_bottom - ph - 8
-        else:
+        elif wa_right < m_right:        # taskbar at right
             x, y = wa_right - pw - 4, wa_bottom - ph - 8
+        else:                           # no taskbar on this monitor → bottom-right
+            x, y = wa_right - pw - 8, wa_bottom - ph - 4
 
-        y = max(wa_top + 4, min(y, sh - ph - 4))
+        # Clamp into this monitor's work area
+        x = max(wa_left + 4, min(x, wa_right - pw - 4))
+        y = max(wa_top + 4, min(y, wa_bottom - ph - 4))
         self.geometry(f"{pw}x{ph}+{x}+{y}")
 
     def _check_hide(self) -> None:
