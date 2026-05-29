@@ -424,16 +424,25 @@ class WinAirPlay:
     def _quit(self, icon=None, item=None) -> None:
         self._stop_event.set()
         self._reconnect_needed.set()  # unblock reconnect loop
-        self._discovery.stop()
-        # Close UI immediately — don't wait for disconnect
-        if self._tray:
-            self._tray.stop()
+        # Close the UI instantly on the Tk thread — NO blocking work here, or the
+        # window freezes white and Windows shows "(not responding)".
+        if self._popup:
+            try: self._popup.hide()
+            except Exception: pass
+        # destroy() (not quit()) so the popup window is actually removed, not
+        # left as a dead frame; it ends mainloop and cascades to the popup child.
         if self._tk_root:
-            self._tk_root.after(0, self._tk_root.quit)
-        # Disconnect clients in background (each join() can take up to 8s)
+            self._tk_root.after(0, self._tk_root.destroy)
+        # Everything that can block (mDNS stop, pyatv disconnects up to 8s each,
+        # WASAPI teardown) runs off the UI thread.
         threading.Thread(target=self._stop_all, daemon=True).start()
 
     def _stop_all(self) -> None:
+        if self._tray:
+            try: self._tray.stop()
+            except Exception: pass
+        try: self._discovery.stop()
+        except Exception: pass
         with self._lock:
             clients = list(self._raop_clients.values())
             self._raop_clients.clear()
@@ -442,11 +451,15 @@ class WinAirPlay:
             try: c.disconnect()
             except Exception: pass
         with self._capture_lock:
-            self._capture.stop()
+            try: self._capture.stop()
+            except Exception: pass
 
     def _shutdown(self) -> None:
-        self._capture.terminate()
-        self._discovery.stop()
+        with self._capture_lock:
+            try: self._capture.terminate()
+            except Exception: pass
+        try: self._discovery.stop()
+        except Exception: pass
 
 
 def main():
