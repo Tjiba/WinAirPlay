@@ -14,7 +14,7 @@ def make_ico() -> None:
     img = Image.open(PNG).convert("RGBA")
     img.save(ICO, format="ICO",
              sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
-    print(f"  icon  → {ICO}")
+    print(f"  icon  -> {ICO}")
 
 
 def build() -> None:
@@ -29,6 +29,8 @@ def build() -> None:
         "--collect-all=pyatv",          # pyatv has many dynamic imports
         "--collect-all=zeroconf",
         "--collect-all=cryptography",   # used by pyatv for pairing
+        "--collect-all=customtkinter",  # ships theme JSON + assets to bundle
+        "--hidden-import=darkdetect",   # customtkinter dependency
         "--hidden-import=pyaudiowpatch",
         "--hidden-import=pystray._win32",
         "--hidden-import=PIL._tkinter_finder",
@@ -49,7 +51,7 @@ def main() -> None:
     print("[2/2] Building executable…")
     build()
     exe = os.path.join(ROOT, "dist", "WinAirPlay.exe")
-    print(f"\nBuild OK  →  {exe}")
+    print(f"\nBuild OK  ->  {exe}")
     print("Upload dist\\WinAirPlay.exe to GitHub Releases.")
 
 
