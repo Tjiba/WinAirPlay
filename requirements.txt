@@ -3,6 +3,10 @@ numpy>=1.24.0
 zeroconf>=0.131.0
 pystray>=0.19.5
 Pillow>=10.0.0
+customtkinter>=5.2.0
 pyatv>=0.14.0
+# pyatv (<=0.17) is written for tinytag 1.x; tinytag 2.x raises
+# UnsupportedFormatError on the tagless streaming WAV and kills the stream.
+tinytag>=1.10,<2
 pyinstaller>=6.3.0
 pytest>=7.0.0
