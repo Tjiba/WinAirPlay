@@ -1,5 +1,6 @@
 import os
 import logging
+import subprocess
 import sys
 import threading
 import time
@@ -73,13 +74,75 @@ def set_startup(enabled: bool) -> None:
         logging.warning("[Startup] registry error: %s", e)
 
 
+# ── Start Menu shortcut (makes the app searchable via the Windows key) ──────────
+
+def _startmenu_lnk() -> str:
+    appdata = os.environ.get("APPDATA", os.path.expanduser("~"))
+    return os.path.join(appdata, "Microsoft", "Windows", "Start Menu",
+                        "Programs", "WinAirPlay.lnk")
+
+
+def is_startmenu_enabled() -> bool:
+    return os.path.exists(_startmenu_lnk())
+
+
+def set_startmenu(enabled: bool) -> None:
+    # PowerShell spawn is slow (~1s) — never run it on the UI thread or the popup
+    # freezes. Do it in the background; the toggle has already flipped visually.
+    threading.Thread(target=_apply_startmenu, args=(enabled,), daemon=True).start()
+
+
+def _apply_startmenu(enabled: bool) -> None:
+    """Create/remove a Start Menu shortcut pointing at the CURRENT exe, so typing
+    'winairplay' in Windows search finds the right binary."""
+    lnk = _startmenu_lnk()
+    try:
+        if not enabled:
+            if os.path.exists(lnk):
+                os.remove(lnk)
+            return
+
+        if getattr(sys, "frozen", False):
+            target, args = sys.executable, ""
+        else:
+            target = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+            args   = f'"{os.path.abspath(__file__)}"'
+        workdir = os.path.dirname(target)
+
+        os.makedirs(os.path.dirname(lnk), exist_ok=True)
+        q = lambda s: s.replace("'", "''")  # escape for PowerShell single-quoted strings
+        ps = (
+            "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('%s');"
+            "$s.TargetPath='%s';$s.Arguments='%s';$s.IconLocation='%s,0';"
+            "$s.WorkingDirectory='%s';$s.Save()"
+        ) % (q(lnk), q(target), q(args), q(target), q(workdir))
+        subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            creationflags=0x08000000,  # CREATE_NO_WINDOW — no console flash
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        )
+    except Exception as e:
+        logging.warning("[StartMenu] %s", e)
+
+
+def _resource_path(name: str) -> str:
+    """Absolute path to a bundled resource. Works from source AND from a
+    PyInstaller --onefile exe (assets are extracted to sys._MEIPASS)."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
+
+
 def _make_icon_image() -> Image.Image:
-    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "WinAirPlayIcon.png")
-    img = Image.open(icon_path).convert("RGBA")
-    bbox = img.getbbox()
-    if bbox:
-        img = img.crop(bbox)
-    return img
+    try:
+        img = Image.open(_resource_path("WinAirPlayIcon.png")).convert("RGBA")
+        bbox = img.getbbox()
+        if bbox:
+            img = img.crop(bbox)
+        return img
+    except Exception as e:
+        # A missing/unreadable icon must never crash the app — use a fallback.
+        logging.warning("[Icon] Falling back to generated tray icon: %s", e)
+        return Image.new("RGBA", (64, 64), (0, 120, 212, 255))
 
 
 class WinAirPlay:
@@ -132,6 +195,8 @@ class WinAirPlay:
             on_quit              = self._quit,
             get_startup_enabled  = is_startup_enabled,
             on_startup_change    = set_startup,
+            get_startmenu_enabled = is_startmenu_enabled,
+            on_startmenu_change  = set_startmenu,
             on_language_change   = self._on_language_change,
         )
 

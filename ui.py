@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import sys
 import tkinter as tk
 from typing import Callable, Optional
 
@@ -348,6 +349,8 @@ class PopupMenu(tk.Toplevel):
         on_quit:             Callable,
         get_startup_enabled: Callable,
         on_startup_change:   Callable,
+        get_startmenu_enabled: Callable,
+        on_startmenu_change: Callable,
         on_language_change:  Callable,
     ):
         super().__init__(tk_root)
@@ -363,6 +366,8 @@ class PopupMenu(tk.Toplevel):
         self._on_quit        = on_quit
         self._get_startup    = get_startup_enabled
         self._on_startup     = on_startup_change
+        self._get_startmenu  = get_startmenu_enabled
+        self._on_startmenu   = on_startmenu_change
         self._on_lang        = on_language_change
         self._visible        = False
         self._styled         = False
@@ -393,8 +398,8 @@ class PopupMenu(tk.Toplevel):
         if not _PIL:
             return
         try:
-            path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "WinAirPlayTransparent.png")
+            base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+            path = os.path.join(base, "WinAirPlayTransparent.png")
             img = Image.open(path).convert("RGBA").resize((26, 26), Image.LANCZOS)
             self._logo_img = ImageTk.PhotoImage(img)
         except Exception:
@@ -468,6 +473,14 @@ class PopupMenu(tk.Toplevel):
         self._startup_switch = ToggleSwitch(startup_row, value=self._get_startup(),
                                             on_change=self._on_startup, bg=BG)
         self._startup_switch.pack(side="right")
+
+        startmenu_row = tk.Frame(sf, bg=BG)
+        startmenu_row.pack(fill="x", padx=PAD, pady=(4, 4))
+        tk.Label(startmenu_row, text=i18n.T("start_menu"), bg=BG, fg=TEXT_S,
+                 font=FONT_SM).pack(side="left")
+        self._startmenu_switch = ToggleSwitch(startmenu_row, value=self._get_startmenu(),
+                                              on_change=self._on_startmenu, bg=BG)
+        self._startmenu_switch.pack(side="right")
 
         tk.Frame(sf, bg=SEP, height=1).pack(fill="x", pady=(6, 0))
         tk.Label(sf, text=i18n.T("language"), bg=BG, fg=DIM,
@@ -610,6 +623,7 @@ class PopupMenu(tk.Toplevel):
         if self._settings_open:
             self._rebuild_inputs()
             self._startup_switch.set(self._get_startup())
+            self._startmenu_switch.set(self._get_startmenu())
             self._settings_frame.pack(fill="x", before=self._footer_sep)
         else:
             self._settings_frame.pack_forget()
