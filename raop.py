@@ -5,6 +5,7 @@ import os
 import queue
 import struct
 import threading
+import time
 from typing import Optional
 
 import pyatv
@@ -36,20 +37,47 @@ class _StreamFeeder(io.RawIOBase):
     # normal operation. Only clock-drift (rare) causes actual drops.
     _MAX_QUEUE_CHUNKS = 32
 
-    def __init__(self) -> None:
+    def __init__(self, name: str = "?") -> None:
         super().__init__()
         self._header: bytes = b""  # served before queue; never dropped
         self._q: "queue.Queue[Optional[bytes]]" = queue.Queue()
         self._remainder = b""
+        # --- DIAGNOSTIC (clock-drift glitch investigation) ---
+        # Throttled telemetry: prove whether the 32-chunk flush fires and when.
+        self._name = name
+        self._t0 = time.monotonic()
+        self._last_report = self._t0
+        self._peak_qsize = 0
+        self._flush_count = 0
 
     def feed_header(self, data: bytes) -> None:
         """Feed the WAV header — always served first, never affected by the queue cap."""
         self._header = data
 
     def feed(self, data: bytes) -> None:
-        if self._q.qsize() >= self._MAX_QUEUE_CHUNKS:
+        qs = self._q.qsize()
+        # --- DIAGNOSTIC telemetry (throttled: ~1 line / 30s on the audio thread) ---
+        if qs > self._peak_qsize:
+            self._peak_qsize = qs
+        now = time.monotonic()
+        if now - self._last_report >= 30.0:
+            logging.info(
+                "[Feeder %s] queue peak=%d/%d over last 30s | flushes so far=%d | %.0fs since connect",
+                self._name, self._peak_qsize, self._MAX_QUEUE_CHUNKS,
+                self._flush_count, now - self._t0,
+            )
+            self._peak_qsize = qs
+            self._last_report = now
+
+        if qs >= self._MAX_QUEUE_CHUNKS:
             # Clock drift: flush the whole backlog in one shot (one clean gap)
             # rather than dropping one chunk at a time (repeated pops).
+            self._flush_count += 1
+            logging.warning(
+                "[Feeder %s] QUEUE FULL (%d chunks = %.0fms) — flushing backlog "
+                "(flush #%d, %.0fs since connect) <-- this is the periodic glitch",
+                self._name, qs, qs * 1024 / 44.1, self._flush_count, now - self._t0,
+            )
             self._remainder = b""
             while not self._q.empty():
                 try:
@@ -153,7 +181,7 @@ class RAOPClient:
         self._volume = volume
 
         self._ready = threading.Event()
-        self._feeder = _StreamFeeder()
+        self._feeder = _StreamFeeder(name=host)
         # WAV header in protected buffer — never dropped by the queue cap
         self._feeder.feed_header(_streaming_wav_header())
 
@@ -209,6 +237,14 @@ class RAOPClient:
                 except Exception:
                     pass
                 self._loop_thread.join(timeout=3)
+        # Release the loop's selector + any sockets pyatv left open. A loop that
+        # is stopped but never closed leaks an IOCP/epoll handle plus its FDs;
+        # repeated across reconnects this exhausts system handles and surfaces as
+        # "[WinError 1450] insufficient system resources" — which kills the live
+        # stream and spins up an endless reconnect storm.
+        thread_alive = bool(self._loop_thread and self._loop_thread.is_alive())
+        if loop is not None and not thread_alive and not loop.is_running():
+            self._close_loop(loop)
         self._loop_thread = None
         self._loop = None
         self._storage = None
@@ -216,6 +252,26 @@ class RAOPClient:
         self._proc = None
 
     # ------------------------------------------------------------------ private
+
+    @staticmethod
+    def _close_loop(loop: asyncio.AbstractEventLoop) -> None:
+        """Cancel leftover tasks and close a stopped loop to free its FDs/handles."""
+        if loop.is_closed():
+            return
+        try:
+            pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+            for t in pending:
+                t.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception as e:
+            logging.debug("[PyATV] loop cleanup: %s", e)
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
 
     def _run_loop(self) -> None:
         asyncio.set_event_loop(self._loop)

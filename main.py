@@ -1,3 +1,4 @@
+import ctypes
 import os
 import logging
 import subprocess
@@ -34,11 +35,29 @@ logging.basicConfig(
 # at WARNING.
 logging.getLogger('pyatv').setLevel(logging.WARNING)
 
-RECONNECT_INTERVAL = 5
+RECONNECT_INTERVAL    = 5
+RECONNECT_BACKOFF_MAX = 60     # cap (s) for a device that keeps failing to connect
+HEALTHY_STREAM_SECONDS = 30    # a stream alive this long resets the backoff
 BUFFER_DURATION    = 2.0
 CHUNK_FRAMES       = 1024
 BYTES_PER_FRAME    = 4   # 2ch × 2 bytes
 DEFAULT_VOLUME     = 50.0
+
+_SINGLE_INSTANCE_MUTEX = None  # keep the handle alive for the whole process
+
+
+def acquire_single_instance() -> bool:
+    """True if we're the only instance. A named Win32 mutex is released by the OS
+    when the process dies (even on kill/crash), so a dead instance never blocks
+    the next launch — while a live one prevents two apps fighting over WASAPI."""
+    global _SINGLE_INSTANCE_MUTEX
+    try:
+        _SINGLE_INSTANCE_MUTEX = ctypes.windll.kernel32.CreateMutexW(
+            None, False, "WinAirPlay_SingleInstance_Mutex"
+        )
+        return ctypes.windll.kernel32.GetLastError() != 183  # ERROR_ALREADY_EXISTS
+    except Exception:
+        return True  # never block startup on a mutex failure
 
 
 _REG_KEY  = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -157,6 +176,9 @@ class WinAirPlay:
         self._capture_lock = threading.Lock()  # serializes all capture start/stop
         self._stop_event = threading.Event()
         self._reconnect_needed = threading.Event()
+        # Per-device reconnect backoff (defuses the reconnect storm)
+        self._reconnect_attempt_at: Dict[str, float] = {}
+        self._reconnect_fails:      Dict[str, int]   = {}
         self._audio_loop_done = threading.Event()
         self._audio_loop_done.set()  # not running initially
 
@@ -236,6 +258,8 @@ class WinAirPlay:
                 # Disconnect this device
                 client = self._raop_clients.pop(name, None)
                 del self._active_devices[name]
+                self._reconnect_attempt_at.pop(name, None)
+                self._reconnect_fails.pop(name, None)
                 no_more = not self._raop_clients
                 if no_more:
                     self._streaming = False
@@ -437,6 +461,8 @@ class WinAirPlay:
                 if name not in devices:
                     disappeared.append((name, self._raop_clients.pop(name, None)))
                     del self._active_devices[name]
+                    self._reconnect_attempt_at.pop(name, None)
+                    self._reconnect_fails.pop(name, None)
 
         for name, client in disappeared:
             if client:
@@ -456,17 +482,32 @@ class WinAirPlay:
             if self._stop_event.is_set():
                 break
 
+            now = time.monotonic()
             with self._lock:
-                to_reconnect = [
-                    (name, dev)
-                    for name, dev in self._active_devices.items()
-                    if name not in self._raop_clients or not self._raop_clients[name]._alive
-                ]
+                to_reconnect = []
+                for name, dev in self._active_devices.items():
+                    client = self._raop_clients.get(name)
+                    if client is not None and client._alive:
+                        continue  # connected, or a connect is still in flight
+                    # Backoff: a device that keeps failing fast must not be
+                    # hammered every 5s (that was the reconnect storm). A stream
+                    # that stayed up a healthy while resets the counter so a
+                    # one-off drop still reconnects immediately.
+                    last = self._reconnect_attempt_at.get(name, 0.0)
+                    if last and now - last >= HEALTHY_STREAM_SECONDS:
+                        self._reconnect_fails[name] = 0
+                    fails   = self._reconnect_fails.get(name, 0)
+                    backoff = min(RECONNECT_INTERVAL * (2 ** fails), RECONNECT_BACKOFF_MAX)
+                    if last and now - last < backoff:
+                        continue  # still backing off
+                    to_reconnect.append((name, dev))
                 stale = []
                 for name, _ in to_reconnect:
                     c = self._raop_clients.pop(name, None)
                     if c is not None:
                         stale.append(c)
+                    self._reconnect_attempt_at[name] = now
+                    self._reconnect_fails[name] = self._reconnect_fails.get(name, 0) + 1
             # Fully disconnect any stale client before replacing it, so its event
             # loop never runs alongside the new connection.
             for c in stale:
@@ -528,6 +569,15 @@ class WinAirPlay:
 
 
 def main():
+    if not acquire_single_instance():
+        logging.info("[Startup] Another WinAirPlay instance is already running — exiting.")
+        try:
+            ctypes.windll.user32.MessageBoxW(
+                0, "WinAirPlay est déjà en cours d'exécution.", "WinAirPlay", 0x40
+            )
+        except Exception:
+            pass
+        return
     app = WinAirPlay()
     app.run()
 
