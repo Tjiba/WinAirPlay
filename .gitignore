@@ -4,14 +4,23 @@ __pycache__/
 *.pyo
 .pytest_cache/
 
+# Virtualenvs
+.venv/
+venv/
+env/
+*.egg-info/
+
 # Build output
 dist/
 build/
 *.spec
 WinAirPlay.ico
 
-# Runtime log
-winairplay.log
+# Logs (runtime winairplay.log, build logs, scratch)
+*.log
+
+# graphify (knowledge-graph cache/output — regenerated locally)
+graphify-out/
 
 # Claude Code internals
 docs/
