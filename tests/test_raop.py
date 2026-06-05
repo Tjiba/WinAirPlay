@@ -56,14 +56,18 @@ class TestStreamFeeder:
     def test_feed_header_served_first(self):
         f = _StreamFeeder()
         f.feed_header(b"\x00\x01\x02\x03")
-        f.feed(b"\x04\x05\x06\x07")
+        f.feed(b"\x04\x05\x06\x07")  # stale audio buffered during pyatv setup
         buf = bytearray(4)
         n = f.readinto(buf)
         assert n == 4
         assert bytes(buf) == b"\x00\x01\x02\x03"  # header comes first
+        # Consuming the header fires _flush_stale(), which intentionally drops the
+        # pre-handshake audio so streaming starts on the freshest PCM. Audio fed
+        # AFTER the header is what actually flows.
+        f.feed(b"\x08\x09\x0a\x0b")
         n2 = f.readinto(buf)
         assert n2 == 4
-        assert bytes(buf) == b"\x04\x05\x06\x07"  # then queue
+        assert bytes(buf) == b"\x08\x09\x0a\x0b"
 
     def test_feed_header_never_dropped_by_cap(self):
         f = _StreamFeeder()
@@ -110,16 +114,22 @@ class TestStreamFeeder:
         n = f.readinto(buf)
         assert n == 0
 
-    def test_queue_cap_drops_oldest(self):
+    def test_queue_cap_drains_oldest_to_target(self):
         f = _StreamFeeder()
-        # Fill to cap + 1: oldest chunk should be dropped
-        for i in range(f._MAX_QUEUE_CHUNKS + 1):
-            f.feed(bytes([i]) * 4)
-        assert f._q.qsize() == f._MAX_QUEUE_CHUNKS
-        # First readable chunk should be index 1 (index 0 was dropped)
+        extra = 5
+        n = f._MAX_QUEUE_CHUNKS + extra
+        for i in range(n):
+            f.feed(bytes([i % 256]) * 4)
+        # Overflow drains the OLDEST down to the drain target (bounding latency),
+        # then the post-overflow feeds accumulate on top — never exceeding the cap.
+        assert f._q.qsize() <= f._MAX_QUEUE_CHUNKS
+        assert f._q.qsize() == f._DRAIN_TARGET_CHUNKS + extra
+        # Freshest audio is kept: the first surviving chunk is the one right after
+        # the drained span (cap - target), and the very last fed chunk is retained.
+        first_surviving = f._MAX_QUEUE_CHUNKS - f._DRAIN_TARGET_CHUNKS
         buf = bytearray(4)
         f.readinto(buf)
-        assert bytes(buf) == bytes([1]) * 4
+        assert bytes(buf) == bytes([first_surviving % 256]) * 4
 
     def test_flush_stale_on_header_consumed(self):
         f = _StreamFeeder()

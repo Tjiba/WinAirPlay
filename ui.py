@@ -253,6 +253,8 @@ class PopupMenu(tk.Toplevel):
         on_startup_change:     Callable,
         get_startmenu_enabled: Callable,
         on_startmenu_change:   Callable,
+        get_latency_ms:        Callable,
+        on_latency_change:     Callable,
         on_language_change:    Callable,
     ):
         super().__init__(tk_root)
@@ -270,11 +272,14 @@ class PopupMenu(tk.Toplevel):
         self._on_startup      = on_startup_change
         self._get_startmenu   = get_startmenu_enabled
         self._on_startmenu    = on_startmenu_change
+        self._get_latency     = get_latency_ms
+        self._on_latency      = on_latency_change
         self._on_lang         = on_language_change
 
         self._visible         = False
         self._settings_open   = False
         self._logo            = None
+        self._lat_after       = None   # debounce handle for the latency slider
         self._device_cards: dict[str, _DeviceCard] = {}
 
         self.withdraw()
@@ -387,6 +392,27 @@ class PopupMenu(tk.Toplevel):
         if self._get_startmenu():
             self._startmenu_switch.select()
 
+        # ── Latency slider ──
+        self._sep(sf)
+        ctk.CTkLabel(sf, text=i18n.T("latency"), text_color=DIM, font=FONT_SEC,
+                     anchor="w").pack(fill="x", padx=PAD + 4, pady=(8, 4))
+        lat_row = ctk.CTkFrame(sf, fg_color="transparent")
+        lat_row.pack(fill="x", padx=PAD + 4, pady=(0, 2))
+        self._lat_value = ctk.CTkLabel(lat_row, text="", text_color=SUB,
+                                       font=FONT_SM, width=58, anchor="e")
+        self._lat_value.pack(side="right")
+        self._lat_slider = ctk.CTkSlider(
+            lat_row, from_=20, to=500, number_of_steps=48, command=self._on_lat_slide,
+            progress_color=ACCENT, button_color="#ffffff",
+            button_hover_color="#e6e6e6", fg_color=TRACK, height=16)
+        self._lat_slider.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        cur_ms = self._latency_ms()
+        self._lat_slider.set(cur_ms)
+        self._lat_value.configure(text=f"{cur_ms} ms")
+        ctk.CTkLabel(sf, text=i18n.T("latency_hint"), text_color=DIM,
+                     font=("Segoe UI", 10), anchor="w", justify="left",
+                     wraplength=W - 2 * PAD).pack(fill="x", padx=PAD + 4, pady=(0, 4))
+
         self._sep(sf)
         ctk.CTkLabel(sf, text=i18n.T("language"), text_color=DIM, font=FONT_SEC,
                      anchor="w").pack(fill="x", padx=PAD + 4, pady=(8, 4))
@@ -406,6 +432,28 @@ class PopupMenu(tk.Toplevel):
             fg_color="transparent", hover_color=CARD_HV,
             text_color=(ACCENT if selected else SUB), corner_radius=8, height=30,
             command=command).pack(fill="x", pady=1)
+
+    # ── latency slider ───────────────────────────────────────────────────────────
+
+    def _latency_ms(self) -> int:
+        try:
+            return int(round(self._get_latency() / 10.0) * 10)
+        except Exception:
+            return 150
+
+    def _on_lat_slide(self, v: float) -> None:
+        ms = int(round(float(v) / 10.0) * 10)   # snap to 10ms steps
+        self._lat_value.configure(text=f"{ms} ms")
+        # Debounce: only commit (which reconnects active devices) once the user
+        # settles, so dragging the slider doesn't restart the stream on every tick.
+        if self._lat_after is not None:
+            try: self.after_cancel(self._lat_after)
+            except Exception: pass
+        self._lat_after = self.after(600, lambda: self._commit_latency(ms))
+
+    def _commit_latency(self, ms: int) -> None:
+        self._lat_after = None
+        self._on_latency(float(ms))
 
     # ── targeted updates ───────────────────────────────────────────────────────
 
@@ -504,6 +552,9 @@ class PopupMenu(tk.Toplevel):
              else self._startup_switch.deselect)()
             (self._startmenu_switch.select if self._get_startmenu()
              else self._startmenu_switch.deselect)()
+            cur_ms = self._latency_ms()
+            self._lat_slider.set(cur_ms)
+            self._lat_value.configure(text=f"{cur_ms} ms")
             self._settings_frame.pack(fill="x", before=self._footer_sep)
         else:
             self._settings_frame.pack_forget()

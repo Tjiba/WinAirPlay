@@ -13,6 +13,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "start_menu":       "Add to Start Menu",
         "quit":             "Quit",
         "language":         "LANGUAGE",
+        "latency":          "LATENCY",
+        "latency_hint":     "Lower = tighter sync, but may crackle on weak Wi-Fi. "
+                            "Reconnects active devices to apply.",
     },
     "fr": {
         "devices":          "APPAREILS",
@@ -23,6 +26,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "start_menu":       "Ajouter au menu Démarrer",
         "quit":             "Quitter",
         "language":         "LANGUE",
+        "latency":          "LATENCE",
+        "latency_hint":     "Plus bas = plus synchro, mais peut grésiller si le "
+                            "Wi-Fi sature. Reconnecte les appareils actifs.",
     },
 }
 
@@ -60,6 +66,31 @@ def save() -> None:
         except (FileNotFoundError, json.JSONDecodeError):
             data = {}
         data["language"] = _current
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except OSError:
+        pass
+
+
+def get_setting(key: str, default=None):
+    """Read an arbitrary persisted setting from config.json."""
+    try:
+        with open(_config_path(), encoding="utf-8") as f:
+            return json.load(f).get(key, default)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return default
+
+
+def set_setting(key: str, value) -> None:
+    """Persist an arbitrary setting into config.json (merge, never clobber)."""
+    try:
+        path = _config_path()
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            data = {}
+        data[key] = value
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
     except OSError:

@@ -15,7 +15,7 @@ from PIL import Image
 
 import i18n
 from capture import AudioCapture, list_loopback_devices
-from raop import RAOPClient
+from raop import RAOPClient, set_raop_latency_ms, get_raop_latency_ms
 from discovery import DeviceDiscovery, AirPlayDevice
 from ui import PopupMenu
 
@@ -35,7 +35,7 @@ logging.basicConfig(
 # at WARNING.
 logging.getLogger('pyatv').setLevel(logging.WARNING)
 
-RECONNECT_INTERVAL    = 5
+RECONNECT_INTERVAL    = 2
 RECONNECT_BACKOFF_MAX = 60     # cap (s) for a device that keeps failing to connect
 HEALTHY_STREAM_SECONDS = 30    # a stream alive this long resets the backoff
 BUFFER_DURATION    = 2.0
@@ -198,6 +198,8 @@ class WinAirPlay:
 
     def run(self) -> None:
         i18n.load()
+        # Restore the saved RAOP latency (applies to every connection from now on)
+        set_raop_latency_ms(i18n.get_setting("latency_ms", get_raop_latency_ms()))
         self._discovery.start()
         self._start_reconnect_thread()
 
@@ -219,6 +221,8 @@ class WinAirPlay:
             on_startup_change    = set_startup,
             get_startmenu_enabled = is_startmenu_enabled,
             on_startmenu_change  = set_startmenu,
+            get_latency_ms       = get_raop_latency_ms,
+            on_latency_change    = self._on_latency_change,
             on_language_change   = self._on_language_change,
         )
 
@@ -290,6 +294,17 @@ class WinAirPlay:
         client.connect(device.host, device.port, volume=volume,
                        et=device.et, md=device.md)
 
+        # Start capture and audio loop early — feeder accumulates audio during
+        # pyatv connection; _flush_stale() clears stale chunks when pyatv starts
+        # reading, so audio flows immediately once pyatv is ready (not after).
+        with self._lock:
+            if not self._streaming and self._raop_clients:
+                self._streaming = True
+                self._audio_loop_done.clear()
+                with self._capture_lock:
+                    self._capture.start()
+                threading.Thread(target=self._audio_loop, daemon=True).start()
+
         if not client._ready.wait(timeout=20):
             logging.error("[Connect] Timeout: %s", device.name)
             self._evict_client(device.name, client)
@@ -299,15 +314,6 @@ class WinAirPlay:
             logging.error("[Connect] Failed: %s", device.name)
             self._evict_client(device.name, client)
             return
-
-        # Start capture + audio loop if not already running
-        with self._lock:
-            if not self._streaming and self._raop_clients:
-                self._streaming = True
-                self._audio_loop_done.clear()
-                with self._capture_lock:
-                    self._capture.start()
-                threading.Thread(target=self._audio_loop, daemon=True).start()
 
         self._refresh_menu()
 
@@ -449,6 +455,47 @@ class WinAirPlay:
                 target=self._connect_and_stream, args=(device, client, vol), daemon=True
             ).start()
 
+        self._refresh_menu()
+
+    # ------------------------------------------------------------------ latency
+
+    def _on_latency_change(self, ms: float) -> None:
+        """UI slider (debounced) → persist + apply. RAOP latency is set at stream
+        setup, so we restart active streams to make it audible immediately."""
+        set_raop_latency_ms(ms)
+        i18n.set_setting("latency_ms", get_raop_latency_ms())
+        with self._lock:
+            has_active = bool(self._raop_clients)
+        if has_active:
+            threading.Thread(target=self._restart_active_streams, daemon=True).start()
+
+    def _restart_active_streams(self) -> None:
+        """Disconnect every active client and reconnect it (same device/volume).
+        Used to apply a new latency. Mirrors _do_input_select minus the device swap."""
+        with self._lock:
+            was_streaming = self._streaming
+            to_restart    = dict(self._active_devices)
+            clients_old   = list(self._raop_clients.values())
+            self._raop_clients.clear()
+            self._streaming = False
+
+        for c in clients_old:
+            try: c.disconnect()
+            except Exception: pass
+        if was_streaming:
+            self._audio_loop_done.wait(timeout=3.0)
+            with self._capture_lock:
+                self._capture.stop()
+
+        for dname, device in to_restart.items():
+            vol    = self._client_volumes.get(dname, DEFAULT_VOLUME)
+            client = RAOPClient()
+            with self._lock:
+                self._raop_clients[dname]   = client
+                self._active_devices[dname] = device
+            threading.Thread(
+                target=self._connect_and_stream, args=(device, client, vol), daemon=True
+            ).start()
         self._refresh_menu()
 
     # ------------------------------------------------------------------ callbacks

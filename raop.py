@@ -12,12 +12,42 @@ import pyatv
 from pyatv.const import Protocol
 from pyatv.storage.file_storage import FileStorage
 from pyatv.protocols.raop.protocols import StreamContext as _StreamContext
-# Reduce pyatv's default RAOP latency from 1.5s (66150 samples) to 25ms.
+# --- Adjustable RAOP latency -------------------------------------------------
+# pyatv's default is 1.5s (66150 samples). This is the constant capture→playback
+# offset: lower = tighter A/V sync but a smaller device jitter buffer, so on a
+# weak/saturated Wi-Fi it can underrun and crackle. AirPlay 2's advertised floor
+# is latencyMin = 11025 (250ms); going under is out-of-spec but works (the old
+# build ran at 25ms) — now that capture feeds a clean real-time stream the device
+# only has to absorb NETWORK jitter, so lower values are viable again. Exposed as
+# a UI slider so the user can dial in their network's floor empirically.
+# The monkeypatch reads the module global at each StreamContext.reset() (called on
+# stream setup), so a new/restarted connection picks up the current value live.
+_RAOP_LATENCY_MS_DEFAULT = 150.0
+_RAOP_LATENCY_MS_MIN     = 20.0    # ~ the old aggressive setting; expect glitches
+_RAOP_LATENCY_MS_MAX     = 500.0   # very safe, ~half a second of buffer
+
+def _ms_to_samples(ms: float) -> int:
+    return max(1, int(round(ms / 1000.0 * 44100)))
+
+_raop_latency_samples = _ms_to_samples(_RAOP_LATENCY_MS_DEFAULT)
+
+
+def set_raop_latency_ms(ms: float) -> None:
+    """Set the RAOP latency (clamped). Takes effect on the next (re)connect."""
+    global _raop_latency_samples
+    ms = max(_RAOP_LATENCY_MS_MIN, min(_RAOP_LATENCY_MS_MAX, float(ms)))
+    _raop_latency_samples = _ms_to_samples(ms)
+
+
+def get_raop_latency_ms() -> float:
+    return _raop_latency_samples / 44100.0 * 1000.0
+
+
 _orig_sc_reset = _StreamContext.reset
 
 def _low_latency_reset(self) -> None:
     _orig_sc_reset(self)
-    self.latency = 1102  # 25ms at 44100Hz
+    self.latency = _raop_latency_samples
 
 _StreamContext.reset = _low_latency_reset
 
@@ -32,10 +62,15 @@ STORAGE_PATH = os.path.join(
 class _StreamFeeder(io.RawIOBase):
     """Thread-safe blocking RawIOBase fed by a queue — bridges live PCM to pyatv."""
 
-    # Cap on PCM audio chunks. miniaudio's internal buffer oscillates and can
-    # accumulate ~10 chunks per cycle; 32 gives headroom without dropping during
-    # normal operation. Only clock-drift (rare) causes actual drops.
-    _MAX_QUEUE_CHUNKS = 32
+    # Safety valve bounding end-to-end latency. With capture fixed to produce at
+    # exactly real time (no phantom silence frames), the queue normally hovers near
+    # empty; this only trips on genuine clock drift (PC capture clock vs device DAC,
+    # ~100ppm → minutes/hours apart) or a transient stall. When hit we drain the
+    # OLDEST chunks down to _DRAIN_TARGET_CHUNKS, snapping latency back low in one
+    # clean resync rather than letting it grow unbounded (the old 4.6s cap meant
+    # steady-state latency oscillated 2.3–4.6s = the "audio keeps falling behind").
+    _MAX_QUEUE_CHUNKS = 72       # ~1.5s of audio
+    _DRAIN_TARGET_CHUNKS = 10    # ~0.2s — keep the freshest audio
 
     def __init__(self, name: str = "?") -> None:
         super().__init__()
@@ -70,20 +105,21 @@ class _StreamFeeder(io.RawIOBase):
             self._last_report = now
 
         if qs >= self._MAX_QUEUE_CHUNKS:
-            # Clock drift: flush the whole backlog in one shot (one clean gap)
-            # rather than dropping one chunk at a time (repeated pops).
             self._flush_count += 1
-            logging.warning(
-                "[Feeder %s] QUEUE FULL (%d chunks = %.0fms) — flushing backlog "
-                "(flush #%d, %.0fs since connect) <-- this is the periodic glitch",
-                self._name, qs, qs * 1024 / 44.1, self._flush_count, now - self._t0,
-            )
-            self._remainder = b""
-            while not self._q.empty():
+            target = self._DRAIN_TARGET_CHUNKS
+            drained = 0
+            while self._q.qsize() > target:
                 try:
                     self._q.get_nowait()
+                    drained += 1
                 except queue.Empty:
                     break
+            self._remainder = b""
+            logging.warning(
+                "[Feeder %s] QUEUE FULL (%d chunks) — drained %d to %d "
+                "(flush #%d, %.0fs since connect)",
+                self._name, qs, drained, target, self._flush_count, now - self._t0,
+            )
         self._q.put(data)
 
     def close_feed(self) -> None:
@@ -300,7 +336,7 @@ class RAOPClient:
             if conf is None:
                 logging.info("[PyATV] Scanning for device at %s ...", host)
                 atvs = await pyatv.scan(
-                    self._loop, hosts=[host], timeout=10, storage=self._storage
+                    self._loop, hosts=[host], timeout=5, storage=self._storage
                 )
                 if not atvs:
                     logging.error("[PyATV] No AirPlay device found at %s", host)
@@ -321,7 +357,9 @@ class RAOPClient:
                 logging.debug("[PyATV] set_volume on connect skipped: %s", e)
 
             self._ready.set()  # audio loop may now start capturing
-            buffered = io.BufferedReader(self._feeder, buffer_size=1024)
+            # Smaller prefetch buffer = pyatv starts decoding after ~1 chunk instead
+            # of waiting to fill 32KB (~185ms) — shaves startup latency on connect.
+            buffered = io.BufferedReader(self._feeder, buffer_size=8192)
             await self._atv.stream.stream_file(buffered)
 
         except Exception:

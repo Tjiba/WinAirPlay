@@ -1,4 +1,5 @@
 import logging
+import time
 import pyaudiowpatch as pyaudio
 import numpy as np
 from dataclasses import dataclass
@@ -9,6 +10,13 @@ TARGET_SAMPLE_RATE = 44100
 TARGET_CHANNELS = 2
 TARGET_SAMPLE_WIDTH = 2  # bytes (int16)
 CHUNK_FRAMES = 1024
+
+# Only synthesize silence once the WASAPI render endpoint has been idle this long
+# (i.e. the user genuinely paused). A momentary buffer dip during active playback
+# refills within ~1 chunk (~21ms at 48kHz), so this threshold must sit comfortably
+# above that — otherwise we'd inject silence mid-stream and cause crackle/drift.
+IDLE_SILENCE_AFTER_S = 0.05
+POLL_INTERVAL_S = 0.002
 
 
 @dataclass
@@ -54,6 +62,7 @@ class AudioCapture:
         self._pa = pyaudio.PyAudio()   # kept alive; NOT terminated between sessions
         self._stream = None
         self._format: Optional[AudioFormat] = None
+        self._reset_resampler()
 
     # ------------------------------------------------------------------ public
 
@@ -69,6 +78,7 @@ class AudioCapture:
         logging.info("[Capture] Opening loopback: %s | %d Hz | %d ch",
                      device["name"], sr, ch)
         self._format = AudioFormat(sample_rate=sr, channels=ch, sample_width=2)
+        self._reset_resampler()  # fresh continuity state per stream/device/format
         self._stream = self._pa.open(
             format=pyaudio.paInt16,
             channels=ch,
@@ -106,11 +116,38 @@ class AudioCapture:
             self._pa = None
 
     def read_chunk(self) -> bytes:
-        """Read one chunk of PCM, normalized to 44100 Hz / stereo / int16."""
-        raw = self._stream.read(self._chunk_frames, exception_on_overflow=False)
-        if self._format and self._format.needs_resample:
-            return self._resample(raw, self._format)
-        return raw
+        """Read one chunk of PCM, normalized to 44100 Hz / stereo / int16.
+
+        WASAPI loopback only produces data at the device's real-time clock, so a
+        full chunk becomes available exactly once per chunk-period. We read it as
+        soon as it is ready — this paces the loop to real time and returns ONLY
+        real audio (no phantom frames). We must NEVER inject silence the instant
+        the buffer dips below a chunk (the old bug): the consumer drains the ring
+        faster than real time, so it dips constantly during active playback, and
+        injecting silence there interleaves gaps into the stream (crackle) while
+        over-producing frames (steadily growing latency / desync).
+
+        Only when the render endpoint is genuinely idle — the user paused all
+        audio — do we synthesize real-time-paced silence, to keep the downstream
+        RAOP sender paced and the AirPlay session warm. A blocking read() can't be
+        used directly because it would stall forever during such a pause.
+        """
+        deadline = time.monotonic() + IDLE_SILENCE_AFTER_S
+        while True:
+            if self._stream.get_read_available() >= self._chunk_frames:
+                raw = self._stream.read(self._chunk_frames, exception_on_overflow=False)
+                if self._format and self._format.needs_resample:
+                    return self._resample(raw)
+                return raw
+            if time.monotonic() >= deadline:
+                # Sustained underrun → genuine pause/idle. Emit one real-time-paced
+                # chunk of silence so pyatv keeps sending and the device stays alive.
+                time.sleep(self._chunk_frames / TARGET_SAMPLE_RATE)
+                return self._silence_chunk()
+            time.sleep(POLL_INTERVAL_S)
+
+    def _silence_chunk(self) -> bytes:
+        return b'\x00' * (self._chunk_frames * TARGET_CHANNELS * TARGET_SAMPLE_WIDTH)
 
     # ------------------------------------------------------------------ private
 
@@ -149,28 +186,89 @@ class AudioCapture:
                         default_name, loopbacks[0]["name"])
         return loopbacks[0]
 
-    @staticmethod
-    def _resample(data: bytes, fmt: AudioFormat) -> bytes:
+    def _reset_resampler(self) -> None:
+        """Reset the continuous-resampler carry state (call per stream/format)."""
+        # Next output position, in input-sample units, relative to the start of
+        # the next input block. Kept across chunks so resampling is phase-continuous
+        # and the average rate is exact (no per-chunk boundary glitch / drift).
+        self._rs_frac: float = 0.0
+        self._rs_prev_l: float = 0.0   # last left/right input sample of prev block
+        self._rs_prev_r: float = 0.0
+        self._rs_primed: bool = False
+
+    def _resample(self, data: bytes) -> bytes:
+        """Normalize a native PCM chunk to 44100 Hz / stereo / int16."""
+        fmt = self._format
         samples = np.frombuffer(data, dtype=np.int16).astype(np.float32)
 
+        # --- downmix/upmix to stereo at the native rate ---
         if fmt.channels == 1:
-            samples = np.repeat(samples, 2)
-        elif fmt.channels > 2:
-            reshaped = samples.reshape(-1, fmt.channels)
-            samples = reshaped[:, :2].flatten().astype(np.float32)
-
-        if fmt.sample_rate != TARGET_SAMPLE_RATE:
-            n_frames = len(samples) // 2
-            new_n_frames = int(n_frames * TARGET_SAMPLE_RATE / fmt.sample_rate)
+            left = samples
+            right = samples
+        elif fmt.channels == 2:
             left = samples[0::2]
             right = samples[1::2]
-            x_in = np.arange(len(left))
-            x_out = np.linspace(0, len(left) - 1, new_n_frames)
-            left_r = np.interp(x_out, x_in, left)
-            right_r = np.interp(x_out, x_in, right)
-            out = np.empty(new_n_frames * 2, dtype=np.float32)
-            out[0::2] = left_r
-            out[1::2] = right_r
-            samples = out
+        else:
+            reshaped = samples.reshape(-1, fmt.channels)
+            left = reshaped[:, 0].copy()
+            right = reshaped[:, 1].copy()
 
-        return np.clip(samples, -32768, 32767).astype(np.int16).tobytes()
+        # --- continuous sample-rate conversion ---
+        if fmt.sample_rate != TARGET_SAMPLE_RATE:
+            left, right = self._resample_rate(left, right, fmt.sample_rate)
+
+        out = np.empty(len(left) * 2, dtype=np.float32)
+        out[0::2] = left
+        out[1::2] = right
+        return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
+
+    def _resample_rate(self, left: np.ndarray, right: np.ndarray, src_rate: int):
+        """Stateful linear resampler, continuous across chunk boundaries.
+
+        Each call carries the fractional read position and the previous block's
+        last sample, so the interpolation grid never restarts at a chunk edge.
+        That removes the periodic boundary discontinuity AND keeps the long-term
+        rate exact (e.g. 48000→44100 yields 940/941 frames alternating, averaging
+        the true 940.8) — both prior sources of audible artifacts and slow drift.
+        """
+        step = src_rate / TARGET_SAMPLE_RATE
+        L = len(left)
+        if L == 0:
+            return left, right
+
+        if not self._rs_primed:
+            self._rs_prev_l = float(left[0])
+            self._rs_prev_r = float(right[0])
+            self._rs_frac = 0.0
+            self._rs_primed = True
+
+        start = self._rs_frac
+        # No output position lands in this block — advance carry, stash tail, done.
+        if start > L - 1:
+            self._rs_frac = start - L
+            self._rs_prev_l = float(left[-1])
+            self._rs_prev_r = float(right[-1])
+            return np.empty(0, np.float32), np.empty(0, np.float32)
+
+        # Augment with the previous block's tail at index 0 (orig index -1) so a
+        # position in [-1, 0) interpolates across the chunk boundary.
+        aug_l = np.empty(L + 1, dtype=np.float32)
+        aug_r = np.empty(L + 1, dtype=np.float32)
+        aug_l[0] = self._rs_prev_l
+        aug_r[0] = self._rs_prev_r
+        aug_l[1:] = left
+        aug_r[1:] = right
+
+        # Output positions: start, start+step, ... while <= L-1 (interpolatable).
+        n_out = int(np.floor((L - 1 - start) / step)) + 1
+        positions = start + step * np.arange(n_out, dtype=np.float64)
+        xq = positions + 1.0                       # into aug index space [0, L]
+        xp = np.arange(L + 1, dtype=np.float64)
+        out_l = np.interp(xq, xp, aug_l).astype(np.float32)
+        out_r = np.interp(xq, xp, aug_r).astype(np.float32)
+
+        # Carry the next position into the next block's index frame (index L → 0).
+        self._rs_frac = (start + step * n_out) - L
+        self._rs_prev_l = float(left[-1])
+        self._rs_prev_r = float(right[-1])
+        return out_l, out_r
