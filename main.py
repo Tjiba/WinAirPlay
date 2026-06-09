@@ -1,3 +1,4 @@
+import atexit
 import ctypes
 import os
 import logging
@@ -44,6 +45,7 @@ BYTES_PER_FRAME    = 4   # 2ch × 2 bytes
 DEFAULT_VOLUME     = 50.0
 
 _SINGLE_INSTANCE_MUTEX = None  # keep the handle alive for the whole process
+_SHOW_EXISTING_EVENT   = "WinAirPlay_ShowExisting_Event"  # 2nd launch → surface 1st
 
 
 def acquire_single_instance() -> bool:
@@ -58,6 +60,25 @@ def acquire_single_instance() -> bool:
         return ctypes.windll.kernel32.GetLastError() != 183  # ERROR_ALREADY_EXISTS
     except Exception:
         return True  # never block startup on a mutex failure
+
+
+def signal_existing_instance() -> None:
+    """A second launch pings the already-running instance to surface its popup, then
+    exits immediately. Replaces the old modal messagebox whose BLOCKING call left the
+    rejected launch parked as a lingering 'ghost' WinAirPlay.exe in Task Manager."""
+    try:
+        k = ctypes.windll.kernel32
+        k.OpenEventW.restype  = ctypes.c_void_p          # avoid 64-bit handle truncation
+        k.OpenEventW.argtypes = [ctypes.c_uint, ctypes.c_bool, ctypes.c_wchar_p]
+        k.SetEvent.argtypes   = [ctypes.c_void_p]
+        k.CloseHandle.argtypes = [ctypes.c_void_p]
+        EVENT_MODIFY_STATE = 0x0002
+        h = k.OpenEventW(EVENT_MODIFY_STATE, False, _SHOW_EXISTING_EVENT)
+        if h:
+            k.SetEvent(h)
+            k.CloseHandle(h)
+    except Exception:
+        pass
 
 
 _REG_KEY  = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -151,6 +172,37 @@ def _resource_path(name: str) -> str:
     return os.path.join(base, name)
 
 
+def _enable_pro_audio_priority():
+    """Register the CURRENT thread with MMCSS "Pro Audio" so a busy desktop
+    (launching an app, GC, GIL contention) can't preempt the capture/send loop
+    long enough to overflow the WASAPI loopback ring — which silently drops
+    samples (read uses exception_on_overflow=False) and is heard as crackle
+    exactly during an app's startup CPU spike. Best-effort: never fatal.
+    Returns (avrt_dll, handle) to revert later, or (None, None) on failure.
+    """
+    try:
+        avrt = ctypes.windll.avrt
+        # restype MUST be c_void_p — a HANDLE truncates to 32 bits otherwise (the
+        # same ctypes pitfall as MonitorFromPoint), making the revert call fail.
+        avrt.AvSetMmThreadCharacteristicsW.restype = ctypes.c_void_p
+        avrt.AvSetMmThreadCharacteristicsW.argtypes = [
+            ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_uint)
+        ]
+        avrt.AvRevertMmThreadCharacteristics.restype = ctypes.c_bool
+        avrt.AvRevertMmThreadCharacteristics.argtypes = [ctypes.c_void_p]
+        task_index = ctypes.c_uint(0)
+        handle = avrt.AvSetMmThreadCharacteristicsW("Pro Audio",
+                                                    ctypes.byref(task_index))
+        if handle:
+            logging.info("[AudioLoop] MMCSS 'Pro Audio' priority enabled")
+            return avrt, handle
+        logging.warning("[AudioLoop] MMCSS enable failed (err=%d) — running at normal priority",
+                        ctypes.get_last_error())
+    except Exception as e:
+        logging.warning("[AudioLoop] MMCSS unavailable (%s) — running at normal priority", e)
+    return None, None
+
+
 def _make_icon_image() -> Image.Image:
     try:
         img = Image.open(_resource_path("WinAirPlayIcon.png")).convert("RGBA")
@@ -233,8 +285,57 @@ class WinAirPlay:
             ),
         )
         self._tray.run_detached()
+        # Surface our popup when a second launch pings us (clean single-instance).
+        self._start_show_listener()
+        # Best-effort RAOP teardown if we exit abnormally — avoid HomePod zombies.
+        atexit.register(self._emergency_teardown)
         self._tk_root.mainloop()
         self._shutdown()
+
+    def _start_show_listener(self) -> None:
+        """First instance: create the named event a second launch signals, and bring
+        our popup to the foreground when it fires. Daemon thread; dies with us."""
+        try:
+            k = ctypes.windll.kernel32
+            k.CreateEventW.restype  = ctypes.c_void_p     # avoid 64-bit handle truncation
+            k.CreateEventW.argtypes = [ctypes.c_void_p, ctypes.c_bool,
+                                       ctypes.c_bool, ctypes.c_wchar_p]
+            # auto-reset, initially non-signaled
+            self._show_event = k.CreateEventW(None, False, False, _SHOW_EXISTING_EVENT)
+        except Exception as e:
+            logging.debug("[Startup] show-event unavailable: %s", e)
+            self._show_event = None
+        if not self._show_event:
+            return
+        threading.Thread(target=self._show_listener_loop, daemon=True,
+                         name="show-listener").start()
+
+    def _show_listener_loop(self) -> None:
+        k = ctypes.windll.kernel32
+        k.WaitForSingleObject.restype  = ctypes.c_uint
+        k.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        while not self._stop_event.is_set():
+            # 0.5s timeout so the thread notices shutdown; 0 == WAIT_OBJECT_0 (pinged).
+            if k.WaitForSingleObject(self._show_event, 500) == 0:
+                if self._tk_root and self._popup:
+                    self._tk_root.after(0, self._popup.show)
+
+    def _emergency_teardown(self) -> None:
+        """atexit hook: if we exit via an uncaught exception (NOT a hard kill, which
+        can't be intercepted), tear down RAOP sessions so the HomePod doesn't keep a
+        dead session holding its single audio slot. No-op on the normal Quit path,
+        which already cleared _raop_clients."""
+        try:
+            with self._lock:
+                clients = list(self._raop_clients.values())
+                self._raop_clients.clear()
+            for c in clients:
+                try:
+                    c.disconnect()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ popup
 
@@ -331,6 +432,7 @@ class WinAirPlay:
 
     def _audio_loop(self) -> None:
         logging.info("[AudioLoop] Started")
+        avrt, mmcss_handle = _enable_pro_audio_priority()
         try:
             while self._streaming and not self._stop_event.is_set():
                 try:
@@ -380,9 +482,15 @@ class WinAirPlay:
 
                 with self._lock:
                     if not self._raop_clients:
+                        logging.info("[AudioLoop] DIAG exit: no clients left (streaming=%s, stop=%s)",
+                                     self._streaming, self._stop_event.is_set())
                         self._streaming = False
                         break
 
+            if not self._streaming:
+                logging.info("[AudioLoop] DIAG exit: _streaming cleared externally")
+            if self._stop_event.is_set():
+                logging.info("[AudioLoop] DIAG exit: stop_event set")
         except Exception:
             logging.exception("[AudioLoop] Error")
         finally:
@@ -402,6 +510,9 @@ class WinAirPlay:
             if stranded and not self._stop_event.is_set():
                 self._reconnect_needed.set()
             self._audio_loop_done.set()
+            if avrt and mmcss_handle:
+                try: avrt.AvRevertMmThreadCharacteristics(mmcss_handle)
+                except Exception: pass
             logging.info("[AudioLoop] Stopped")
 
     # ------------------------------------------------------------------ volume / input
@@ -427,6 +538,7 @@ class WinAirPlay:
         threading.Thread(target=self._do_input_select, args=(idx, name), daemon=True).start()
 
     def _do_input_select(self, idx: Optional[int], name: str) -> None:
+        logging.info("[Trigger] DIAG _do_input_select idx=%s name=%s", idx, name)
         with self._lock:
             was_streaming = self._streaming
             to_restart    = dict(self._active_devices)
@@ -472,6 +584,7 @@ class WinAirPlay:
     def _restart_active_streams(self) -> None:
         """Disconnect every active client and reconnect it (same device/volume).
         Used to apply a new latency. Mirrors _do_input_select minus the device swap."""
+        logging.info("[Trigger] DIAG _restart_active_streams (latency=%.0fms)", get_raop_latency_ms())
         with self._lock:
             was_streaming = self._streaming
             to_restart    = dict(self._active_devices)
@@ -511,6 +624,9 @@ class WinAirPlay:
                     self._reconnect_attempt_at.pop(name, None)
                     self._reconnect_fails.pop(name, None)
 
+        if disappeared:
+            logging.info("[Trigger] DIAG devices disappeared from mDNS: %s",
+                         [n for n, _ in disappeared])
         for name, client in disappeared:
             if client:
                 threading.Thread(target=client.disconnect, daemon=True).start()
@@ -617,13 +733,10 @@ class WinAirPlay:
 
 def main():
     if not acquire_single_instance():
-        logging.info("[Startup] Another WinAirPlay instance is already running — exiting.")
-        try:
-            ctypes.windll.user32.MessageBoxW(
-                0, "WinAirPlay est déjà en cours d'exécution.", "WinAirPlay", 0x40
-            )
-        except Exception:
-            pass
+        # Don't pop a blocking messagebox (it left a lingering ghost process). Ping
+        # the running instance to show itself, then exit immediately and cleanly.
+        logging.info("[Startup] Already running — surfacing the existing instance and exiting.")
+        signal_existing_instance()
         return
     app = WinAirPlay()
     app.run()

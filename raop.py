@@ -9,9 +9,11 @@ import time
 from typing import Optional
 
 import pyatv
+from pyatv import exceptions as pyatv_exceptions
 from pyatv.const import Protocol
 from pyatv.storage.file_storage import FileStorage
 from pyatv.protocols.raop.protocols import StreamContext as _StreamContext
+from pyatv.support.rtsp import RtspSession as _RtspSession
 # --- Adjustable RAOP latency -------------------------------------------------
 # pyatv's default is 1.5s (66150 samples). This is the constant capture→playback
 # offset: lower = tighter A/V sync but a smaller device jitter buffer, so on a
@@ -22,9 +24,21 @@ from pyatv.protocols.raop.protocols import StreamContext as _StreamContext
 # a UI slider so the user can dial in their network's floor empirically.
 # The monkeypatch reads the module global at each StreamContext.reset() (called on
 # stream setup), so a new/restarted connection picks up the current value live.
-_RAOP_LATENCY_MS_DEFAULT = 150.0
-_RAOP_LATENCY_MS_MIN     = 20.0    # ~ the old aggressive setting; expect glitches
-_RAOP_LATENCY_MS_MAX     = 500.0   # very safe, ~half a second of buffer
+#
+# REACHING TRUE LOW LATENCY (the TuneBlade question): pyatv hardcodes
+# `latencyMin: 11025` (250ms) / `latencyMax: 88200` (2s) in the audio SETUP it sends
+# the device (raop/protocols/airplayv2.py). That range is what we DECLARE we support.
+# If we set context.latency below 11025 but still declare latencyMin=11025, it's
+# inconsistent → the HomePod falls back to a big buffer (~1s) → "100ms" felt like ~1s.
+# The HomePod itself CAN play much lower (TuneBlade reaches ~50ms on the same device),
+# so the 250ms floor is pyatv's, not the hardware's. Fix: we ALSO patch the SETUP so
+# the declared latencyMin follows our configured value (see _patched_rtsp_setup) —
+# now the device is told the low value is allowed AND gets a matching rtptime, so it
+# honors it. Lower = tighter A/V sync but a smaller jitter buffer (raise it if it
+# crackles on weak Wi-Fi).
+_RAOP_LATENCY_MS_DEFAULT = 120.0
+_RAOP_LATENCY_MS_MIN     = 50.0    # TuneBlade's floor — the HomePod honors this
+_RAOP_LATENCY_MS_MAX     = 500.0   # half a second of jitter buffer for weak Wi-Fi
 
 def _ms_to_samples(ms: float) -> int:
     return max(1, int(round(ms / 1000.0 * 44100)))
@@ -52,6 +66,33 @@ def _low_latency_reset(self) -> None:
 _StreamContext.reset = _low_latency_reset
 
 
+# Patch the audio-stream SETUP so the latency range we DECLARE to the device follows
+# our configured value. pyatv hardcodes latencyMin=11025 (250ms); without this the
+# device rejects/ignores a lower rtptime offset and buffers ~1s. Only the audio
+# SETUP body carries streams[].latencyMin, so other SETUP calls pass through.
+_orig_rtsp_setup = _RtspSession.setup
+
+async def _patched_rtsp_setup(self, headers=None, body=None):
+    try:
+        if isinstance(body, dict):
+            streams = body.get("streams")
+            if isinstance(streams, list):
+                lat = _raop_latency_samples
+                for s in streams:
+                    if isinstance(s, dict) and "latencyMin" in s:
+                        s["latencyMin"] = lat
+                        # Keep headroom above our value so the device may buffer more
+                        # under jitter, but never below our floor.
+                        s["latencyMax"] = max(s.get("latencyMax", lat), lat)
+                        logging.info("[PyATV] SETUP latency range set to min=%d (%.0fms)",
+                                     lat, lat / 44100.0 * 1000.0)
+    except Exception as e:
+        logging.debug("[PyATV] could not patch SETUP latency: %s", e)
+    return await _orig_rtsp_setup(self, headers=headers, body=body)
+
+_RtspSession.setup = _patched_rtsp_setup
+
+
 STORAGE_PATH = os.path.join(
     os.environ.get("APPDATA", os.path.expanduser("~")),
     "WinAirPlay",
@@ -77,6 +118,7 @@ class _StreamFeeder(io.RawIOBase):
         self._header: bytes = b""  # served before queue; never dropped
         self._q: "queue.Queue[Optional[bytes]]" = queue.Queue()
         self._remainder = b""
+        self._eof = False          # sticky once the EOF sentinel is read
         # --- DIAGNOSTIC (clock-drift glitch investigation) ---
         # Throttled telemetry: prove whether the 32-chunk flush fires and when.
         self._name = name
@@ -143,9 +185,17 @@ class _StreamFeeder(io.RawIOBase):
                 # pyatv's connection/setup phase so we start on the freshest PCM.
                 self._flush_stale()
             return n
+        # Sticky EOF: pyatv's miniaudio decoder re-probes the source after the
+        # first empty read. Without this latch the 2nd readinto would block forever
+        # on the drained queue, so stream_file() never returns and every
+        # disconnect() hit its 8s force-stop timeout (zombie sender holding the
+        # device's single RAOP slot → auto-reconnect couldn't restore audio).
+        if self._eof:
+            return 0
         while not self._remainder:
             chunk = self._q.get()
             if chunk is None:
+                self._eof = True
                 return 0  # EOF
             self._remainder = chunk
         n = min(len(b), len(self._remainder))
@@ -248,8 +298,10 @@ class RAOPClient:
 
     def set_volume(self, volume_pct: float) -> None:
         self._volume = volume_pct
-        # pyatv Audio.set_volume() takes 0–100 (percent), not 0.0–1.0
-        if self._atv and self._loop:
+        # pyatv Audio.set_volume() takes 0–100 (percent), not 0.0–1.0.
+        # Skip if not alive: scheduling volume calls on a dead/blocked connection
+        # floods the asyncio loop with failing coroutines and starves audio pacing.
+        if self._atv and self._loop and self._alive:
             asyncio.run_coroutine_threadsafe(
                 self._set_volume_async(volume_pct), self._loop
             )
@@ -316,8 +368,39 @@ class RAOPClient:
     async def _set_volume_async(self, normalized: float) -> None:
         try:
             await self._atv.audio.set_volume(normalized)
+        except pyatv_exceptions.BlockedStateError:
+            # Audio interface blocked = the pyatv connection is dead (device dropped
+            # us / facade closed). Drop it so the audio loop reconnects, instead of
+            # flooding the loop with failing volume calls (starves audio → crackle).
+            self._mark_dead("audio interface blocked")
         except Exception as e:
             logging.warning("[PyATV] set_volume failed: %s", e)
+
+    def _mark_dead(self, reason: str) -> None:
+        """Flag the connection dead so the audio loop tears it down + reconnects.
+        Idempotent; safe from the pyatv-loop thread or the audio thread."""
+        if self._alive:
+            logging.warning("[PyATV] connection down (%s) — dropping for reconnect", reason)
+        self._alive = False
+        self._proc = None
+        # Unblock stream_file (blocked reading the feeder) so _stream_task returns
+        # and its finally tears pyatv down cleanly for a fresh reconnect.
+        f = self._feeder
+        if f is not None:
+            try:
+                f.close_feed()
+            except Exception:
+                pass
+
+    # --- pyatv DeviceListener: fired the instant the device drops/closes us. ---
+    # Without this we never learned the session died — pyatv closed the facade
+    # ("audio is blocked") while stream_file kept pushing UDP into a dead session:
+    # no sound out, and _alive stayed True so the reconnect loop never fired.
+    def connection_lost(self, exception: Exception) -> None:
+        self._mark_dead(f"connection lost: {exception}")
+
+    def connection_closed(self) -> None:
+        self._mark_dead("connection closed")
 
     async def _stream_task(self, host: str, port: int, volume: float) -> None:
         try:
@@ -334,19 +417,35 @@ class RAOPClient:
                     conf = None
 
             if conf is None:
-                logging.info("[PyATV] Scanning for device at %s ...", host)
-                atvs = await pyatv.scan(
-                    self._loop, hosts=[host], timeout=5, storage=self._storage
-                )
-                if not atvs:
-                    logging.error("[PyATV] No AirPlay device found at %s", host)
+                logging.info("[PyATV] Scanning for %s ...", host)
+                # Broad multicast scan, then match by IP — do NOT use hosts=[host].
+                # The targeted scan sends UNICAST mDNS queries, which this HomePod /
+                # network doesn't answer reliably: it returned 0 devices ("No AirPlay
+                # device found") while a broad scan found the very same HomePod at the
+                # same IP (verified). The broad scan mirrors how our DeviceDiscovery
+                # finds it over multicast — so if the device is in the popup, this
+                # connects. Costs a couple extra seconds scanning the whole network.
+                atvs = await pyatv.scan(self._loop, timeout=5, storage=self._storage)
+                match = [a for a in atvs if str(a.address) == host]
+                if not match:
+                    logging.error("[PyATV] %s not found (%d device(s) seen: %s)",
+                                  host, len(atvs), [str(a.address) for a in atvs])
                     return
-                conf = atvs[0]
+                conf = match[0]
                 RAOPClient._config_cache[host] = conf
                 logging.info("[PyATV] Found: %s (%s)", conf.name, conf.address)
                 self._atv = await pyatv.connect(conf, self._loop, storage=self._storage)
 
             logging.info("[PyATV] Connected — streaming audio to %s", conf.name)
+
+            # Get notified the instant the device drops/closes us, so we tear down
+            # and reconnect cleanly instead of streaming UDP into a dead session.
+            # pyatv holds the listener via a weakref; self is kept alive by main's
+            # _raop_clients dict, so it won't expire.
+            try:
+                self._atv.listener = self
+            except Exception as e:
+                logging.debug("[PyATV] could not attach device listener: %s", e)
 
             await self._storage.save()
 
@@ -357,9 +456,18 @@ class RAOPClient:
                 logging.debug("[PyATV] set_volume on connect skipped: %s", e)
 
             self._ready.set()  # audio loop may now start capturing
+            # Snapshot the feeder into a local: a concurrent disconnect() nulls
+            # self._feeder, and racing it into io.BufferedReader(None) crashed with
+            # "'NoneType' object has no attribute 'readable'" (logs, during reconnect
+            # storms) — which killed the just-established stream. If we already lost
+            # the feeder, the disconnect won the race; just bail to the finally.
+            feeder = self._feeder
+            if feeder is None:
+                logging.info("[PyATV] Feeder gone before stream start — disconnect won the race")
+                return
             # Smaller prefetch buffer = pyatv starts decoding after ~1 chunk instead
             # of waiting to fill 32KB (~185ms) — shaves startup latency on connect.
-            buffered = io.BufferedReader(self._feeder, buffer_size=8192)
+            buffered = io.BufferedReader(feeder, buffer_size=8192)
             await self._atv.stream.stream_file(buffered)
 
         except Exception:

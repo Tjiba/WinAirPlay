@@ -63,6 +63,11 @@ class AudioCapture:
         self._stream = None
         self._format: Optional[AudioFormat] = None
         self._reset_resampler()
+        # --- pause/resume silence ---
+        self._in_silence = False
+        self._silence_since = 0.0
+        self._silence_deadline = 0.0   # absolute monotonic target for real-time silence pacing
+        self._diag_reads = 0
 
     # ------------------------------------------------------------------ public
 
@@ -132,17 +137,68 @@ class AudioCapture:
         RAOP sender paced and the AirPlay session warm. A blocking read() can't be
         used directly because it would stall forever during such a pause.
         """
+        # Snapshot the stream: a concurrent stop() sets self._stream = None, and
+        # racing that into self._stream.get_read_available() crashed read_chunk with
+        # "'NoneType' object has no attribute 'get_read_available'" (logs), killing
+        # the audio loop. Hold a local ref — if stop() closes THIS object mid-read
+        # PyAudio raises OSError, which the audio loop already handles by restarting.
+        stream = self._stream
+        if stream is None:
+            raise OSError("capture stream is closed")
+        chunk_dur = self._chunk_frames / TARGET_SAMPLE_RATE
         deadline = time.monotonic() + IDLE_SILENCE_AFTER_S
         while True:
-            if self._stream.get_read_available() >= self._chunk_frames:
-                raw = self._stream.read(self._chunk_frames, exception_on_overflow=False)
+            avail = stream.get_read_available()
+            if avail >= self._chunk_frames:
+                resuming = self._in_silence
+                # --- LIVE-STREAM RESYNC (fixes startup glitch AND the crackle when
+                # switching video/tab) --- WASAPI loopback presents a backlog in two
+                # cases: (a) startup/stall → several chunks queue up; (b) resuming from
+                # a silence gap → the sub-chunk frames left unread when we entered
+                # silence are now STALE (they're the audio from BEFORE the gap), and
+                # replaying them right after the injected silence is exactly the blip/
+                # crackle heard on tab switch. In both cases, for a LIVE stream we want
+                # "now": drop everything older than the freshest chunk. We only do this
+                # on a real backlog (≥2 chunks) or on resume — never during steady
+                # playback (avail hovers ~1 chunk), so normal audio is untouched.
+                if avail > self._chunk_frames and (avail >= 2 * self._chunk_frames or resuming):
+                    stale = avail - self._chunk_frames
+                    stream.read(stale, exception_on_overflow=False)  # drop stale, keep freshest
+                    self._rs_primed = False  # re-prime resampler across the discontinuity
+                    logging.info("[Capture] DIAG resync: dropped %d stale frames (avail=%d, resuming=%s)",
+                                 stale, avail, resuming)
+                raw = stream.read(self._chunk_frames, exception_on_overflow=False)
+                if resuming:  # DIAG: real audio came back after a silence gap
+                    logging.info("[Capture] DIAG audio RESUMED after %.1fs silent (avail=%d)",
+                                 time.monotonic() - self._silence_since, avail)
+                    self._in_silence = False
                 if self._format and self._format.needs_resample:
                     return self._resample(raw)
                 return raw
-            if time.monotonic() >= deadline:
-                # Sustained underrun → genuine pause/idle. Emit one real-time-paced
-                # chunk of silence so pyatv keeps sending and the device stays alive.
-                time.sleep(self._chunk_frames / TARGET_SAMPLE_RATE)
+            # Produce silence if we're ALREADY mid-pause (immediately — no 50ms
+            # re-poll) or the endpoint has been idle past the grace threshold. The
+            # old code re-ran the full 50ms poll before EVERY silence chunk, so during
+            # a sustained pause silence was produced ~3x slower than real time; pyatv
+            # fell far behind its real-time anchor and, at a small (120ms) device
+            # buffer, the HomePod underran and took ~1min to recover (no sound after a
+            # short pause).
+            if self._in_silence or time.monotonic() >= deadline:
+                now = time.monotonic()
+                if not self._in_silence:  # entered a silence gap (pause/idle)
+                    logging.info("[Capture] DIAG entering SILENCE (no loopback data >%.0fms, avail=%d)",
+                                 IDLE_SILENCE_AFTER_S * 1000, avail)
+                    self._in_silence = True
+                    self._silence_since = now
+                    self._silence_deadline = now   # anchor real-time pacing to now
+                # Absolute-deadline pacing: advance the target by one chunk and sleep
+                # until it, so the long-term silence rate is EXACTLY real time.
+                # time.sleep() alone runs ~0.6ms long per 23ms chunk on Windows →
+                # ~0.5s of accumulated drift over a 17s pause, which at a 120ms buffer
+                # is enough to underrun the HomePod. The absolute deadline self-corrects.
+                self._silence_deadline += chunk_dur
+                sleep_for = self._silence_deadline - time.monotonic()
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
                 return self._silence_chunk()
             time.sleep(POLL_INTERVAL_S)
 

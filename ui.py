@@ -143,6 +143,8 @@ class _DeviceCard(ctk.CTkFrame):
         self._on_volume = on_volume
         self._is_active: Optional[bool] = None
         self._anim = None
+        self._vol_job = None          # debounce timer for slider drags
+        self._pending_vol = volume
 
         self._name_row = ctk.CTkFrame(self, fg_color="transparent")
         self._name_row.pack(fill="x", padx=12)
@@ -171,8 +173,22 @@ class _DeviceCard(ctk.CTkFrame):
         self.set_active(is_active, volume)
 
     def _on_slide(self, v: float) -> None:
+        # Update the % label live, but DEBOUNCE the actual device call: a single
+        # drag fires dozens of events; forwarding each one floods the pyatv asyncio
+        # loop with set_volume coroutines and starves the real-time audio pacing
+        # (heard as crackle while adjusting volume). Coalesce to the latest value.
         self._pct.configure(text=f"{int(float(v))}%")
-        self._on_volume(float(v))
+        self._pending_vol = float(v)
+        if self._vol_job is not None:
+            try:
+                self.after_cancel(self._vol_job)
+            except Exception:
+                pass
+        self._vol_job = self.after(80, self._flush_volume)
+
+    def _flush_volume(self) -> None:
+        self._vol_job = None
+        self._on_volume(self._pending_vol)
 
     def _enter(self, e) -> None:
         if not self._is_active:
@@ -401,8 +417,10 @@ class PopupMenu(tk.Toplevel):
         self._lat_value = ctk.CTkLabel(lat_row, text="", text_color=SUB,
                                        font=FONT_SM, width=58, anchor="e")
         self._lat_value.pack(side="right")
+        # 50ms (TuneBlade's floor — the HomePod honors it now that we patch the SETUP
+        # latency range) up to 500ms. 45 steps = 10ms increments for fine dial-in.
         self._lat_slider = ctk.CTkSlider(
-            lat_row, from_=20, to=500, number_of_steps=48, command=self._on_lat_slide,
+            lat_row, from_=50, to=500, number_of_steps=45, command=self._on_lat_slide,
             progress_color=ACCENT, button_color="#ffffff",
             button_hover_color="#e6e6e6", fg_color=TRACK, height=16)
         self._lat_slider.pack(side="left", fill="x", expand=True, padx=(0, 8))

@@ -114,6 +114,41 @@ class TestStreamFeeder:
         n = f.readinto(buf)
         assert n == 0
 
+    def test_eof_is_sticky_after_close(self):
+        """EOF must be sticky: once close_feed() signals EOF, EVERY subsequent
+        readinto returns 0 immediately and never blocks. pyatv's miniaudio decode
+        pipeline re-probes the source after the first EOF; the old code enqueued a
+        single None sentinel, so the 2nd read blocked forever on the empty queue —
+        stream_file() never returned and disconnect() always hit its 8s force-stop
+        timeout (the universal '[PyATV] disconnect: loop still alive after 8s')."""
+        f = _StreamFeeder()
+        f.close_feed()
+        buf = bytearray(4)
+        assert f.readinto(buf) == 0  # first read consumes the EOF sentinel
+
+        # Second read must NOT block. Run it in a thread and assert it completes.
+        result = {}
+        t = threading.Thread(target=lambda: result.__setitem__("n", f.readinto(buf)))
+        t.start()
+        t.join(timeout=2.0)
+        assert not t.is_alive(), "readinto blocked after EOF — feeder deadlock"
+        assert result["n"] == 0
+
+    def test_eof_sticky_after_draining_real_audio(self):
+        """EOF stays sticky even after real audio was streamed then close_feed()."""
+        f = _StreamFeeder()
+        f.feed(b"\x01\x02\x03\x04")
+        f.close_feed()
+        buf = bytearray(4)
+        assert f.readinto(buf) == 4   # real chunk
+        assert f.readinto(buf) == 0   # EOF sentinel
+        result = {}
+        t = threading.Thread(target=lambda: result.__setitem__("n", f.readinto(buf)))
+        t.start()
+        t.join(timeout=2.0)
+        assert not t.is_alive(), "readinto blocked after EOF — feeder deadlock"
+        assert result["n"] == 0
+
     def test_queue_cap_drains_oldest_to_target(self):
         f = _StreamFeeder()
         extra = 5
@@ -231,6 +266,40 @@ class TestRAOPClient:
         c._alive = True
         c._feeder = None
         c.send_chunk(b"\x00" * 64)  # must not raise
+
+    def test_connection_lost_marks_dead_and_unblocks_feeder(self):
+        """The pyatv DeviceListener callback must flag the client dead (so the audio
+        loop reconnects) and EOF the feeder (so the blocked stream_file returns) —
+        the fix for 'device dropped us but we kept streaming into the void'."""
+        c = RAOPClient()
+        c._alive = True
+        c._proc = object()
+        feeder = MagicMock()
+        c._feeder = feeder
+        c.connection_lost(Exception("boom"))
+        assert c._alive is False
+        assert c._proc is None
+        feeder.close_feed.assert_called_once()
+
+    def test_connection_closed_marks_dead(self):
+        c = RAOPClient()
+        c._alive = True
+        c._proc = object()
+        c._feeder = None
+        c.connection_closed()  # must not raise even without a feeder
+        assert c._alive is False
+        assert c._proc is None
+
+    def test_set_volume_noop_when_dead(self):
+        """A blocked/dead connection must not schedule volume coroutines (the flood
+        that starved audio pacing). Guarded by _alive."""
+        c = RAOPClient()
+        c._atv = MagicMock()
+        c._loop = MagicMock()
+        c._alive = False
+        with patch("raop.asyncio.run_coroutine_threadsafe") as run:
+            c.set_volume(42.0)
+            run.assert_not_called()
 
     def test_disconnect_closes_feeder(self):
         c = RAOPClient()

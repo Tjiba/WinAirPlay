@@ -102,6 +102,78 @@ class TestResample:
         assert np.all(np.diff(joined) >= 0)
 
 
+class TestReadChunkStreamRace:
+    def test_read_chunk_raises_oserror_when_stream_none(self):
+        """A concurrent stop() sets self._stream = None. read_chunk must surface a
+        clean OSError (which the audio loop catches + restarts) instead of crashing
+        with AttributeError: 'NoneType' has no attribute 'get_read_available' — the
+        race that killed the whole audio loop in the field logs."""
+        cap = object.__new__(AudioCapture)
+        cap._stream = None
+        cap._chunk_frames = 1024
+        cap._format = None
+        cap._in_silence = False
+        cap._silence_since = 0.0
+        with pytest.raises(OSError):
+            cap.read_chunk()
+
+
+class _FakeStream:
+    """Minimal WASAPI-stream stand-in: serves a fixed backlog of available frames."""
+    def __init__(self, avail_frames: int):
+        self._avail = avail_frames
+        self.reads: list = []
+
+    def get_read_available(self) -> int:
+        return self._avail
+
+    def read(self, n, exception_on_overflow=False) -> bytes:
+        self.reads.append(n)
+        self._avail -= n
+        return b"\x00" * (n * 2 * 2)  # stereo int16
+
+
+class TestLiveResync:
+    def _cap(self, stream) -> AudioCapture:
+        cap = object.__new__(AudioCapture)
+        cap._stream = stream
+        cap._chunk_frames = 1024
+        cap._format = None          # no resample → returns raw chunk
+        cap._in_silence = False
+        cap._silence_since = 0.0
+        return cap
+
+    def test_backlog_is_dropped_to_stay_live(self):
+        """A multi-chunk backlog must be discarded down to the freshest chunk so the
+        producer never bursts stale audio into the feeder (the startup-glitch fix)."""
+        stream = _FakeStream(avail_frames=10 * 1024)  # 10 chunks queued
+        out = self._cap(stream).read_chunk()
+        assert len(out) == 1024 * 2 * 2            # one chunk returned
+        # First read drops 9 stale chunks, second read returns 1 fresh chunk.
+        assert stream.reads == [9 * 1024, 1024]
+
+    def test_no_drop_when_buffer_near_empty(self):
+        """Steady state (≤1 chunk available) must read exactly one chunk, no drops —
+        otherwise we'd inject artifacts during normal real-time playback."""
+        stream = _FakeStream(avail_frames=1024)
+        out = self._cap(stream).read_chunk()
+        assert len(out) == 1024 * 2 * 2
+        assert stream.reads == [1024]              # single clean read, no resync drop
+
+    def test_resume_drops_stale_subchunk_backlog(self):
+        """On resume from a silence gap, even a SUB-2-chunk backlog is stale (the
+        pre-gap tail) and must be dropped — replaying it after the injected silence
+        is the crackle heard when switching video/tab. avail=1500 (<2 chunks) would
+        NOT trigger the plain backlog path, but the resume path must."""
+        cap = self._cap(_FakeStream(avail_frames=1500))
+        cap._in_silence = True                     # we were in a silence gap
+        cap._silence_since = 0.0
+        out = cap.read_chunk()
+        assert len(out) == 1024 * 2 * 2
+        assert cap._stream.reads == [1500 - 1024, 1024]  # drop stale, keep freshest
+        assert cap._in_silence is False            # resumed
+
+
 class TestFindLoopbackDevice:
     def test_returns_dict_or_none(self):
         cap = AudioCapture()

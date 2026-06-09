@@ -14,8 +14,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "quit":             "Quit",
         "language":         "LANGUAGE",
         "latency":          "LATENCY",
-        "latency_hint":     "Lower = tighter sync, but may crackle on weak Wi-Fi. "
-                            "Reconnects active devices to apply.",
+        "latency_hint":     "Lower = tighter A/V sync; raise it if audio crackles on "
+                            "weak Wi-Fi. Reconnects active devices to apply.",
     },
     "fr": {
         "devices":          "APPAREILS",
@@ -27,8 +27,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "quit":             "Quitter",
         "language":         "LANGUE",
         "latency":          "LATENCE",
-        "latency_hint":     "Plus bas = plus synchro, mais peut grésiller si le "
-                            "Wi-Fi sature. Reconnecte les appareils actifs.",
+        "latency_hint":     "Plus bas = vidéo plus synchro ; monte-la si ça grésille "
+                            "en Wi-Fi faible. Reconnecte les appareils actifs.",
     },
 }
 
