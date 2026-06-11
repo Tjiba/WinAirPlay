@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "winairplay"
+version = "1.6.0"
+description = "Stream Windows audio to Apple TV, HomePod or any AirPlay speaker"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "pyaudiowpatch==0.2.12.6",
+    "numpy>=1.24.0",
+    "zeroconf>=0.131.0",
+    "pystray>=0.19.5",
+    "Pillow>=10.0.0",
+    "customtkinter>=5.2.0",
+    # Pinned exactly: raop.py monkeypatches pyatv internals (StreamContext.reset,
+    # RtspSession.setup) to reach sub-250ms latency. Bump deliberately and run
+    # tests/test_raop.py::TestPyatvPatchTargets after.
+    "pyatv==0.17.0",
+    # pyatv (<=0.17) is written for tinytag 1.x; tinytag 2.x raises
+    # UnsupportedFormatError on the tagless streaming WAV and kills the stream.
+    "tinytag>=1.10,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pyinstaller>=6.3.0",
+    "pytest>=7.0.0",
+]
+
+[project.gui-scripts]
+winairplay = "winairplay.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

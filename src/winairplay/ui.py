@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import ctypes
-import os
-import sys
 import tkinter as tk
 from typing import Callable, Optional
 
 import customtkinter as ctk
 
-import i18n
+from winairplay import i18n
+from winairplay.resources import resource_path
 
 try:
     from PIL import Image
@@ -321,8 +320,7 @@ class PopupMenu(tk.Toplevel):
         if not _PIL:
             return
         try:
-            base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-            img = Image.open(os.path.join(base, "WinAirPlayTransparent.png")).convert("RGBA")
+            img = Image.open(resource_path("WinAirPlayTransparent.png")).convert("RGBA")
             self._logo = ctk.CTkImage(light_image=img, dark_image=img, size=(24, 24))
         except Exception:
             self._logo = None
@@ -483,16 +481,18 @@ class PopupMenu(tk.Toplevel):
         devices = self._get_devices()
         active  = self._get_active()
         if devices:
-            for name, device in devices.items():
+            # Dict key = unique mDNS service id; device.name is what the user sees
+            # (two devices may share a display name).
+            for key, device in devices.items():
                 card = _DeviceCard(
-                    self._device_section, name, device,
-                    is_active=name in active,
-                    volume=self._get_vol(name),
+                    self._device_section, device.name, device,
+                    is_active=key in active,
+                    volume=self._get_vol(key),
                     on_click=lambda d=device: self._on_connect(d),
-                    on_volume=lambda v, n=name: self._on_vol(n, v),
+                    on_volume=lambda v, k=key: self._on_vol(k, v),
                 )
                 card.pack(fill="x", pady=3)
-                self._device_cards[name] = card
+                self._device_cards[key] = card
         else:
             ctk.CTkLabel(self._device_section, text=i18n.T("searching"),
                          text_color=DIM, font=FONT_SM, anchor="w").pack(

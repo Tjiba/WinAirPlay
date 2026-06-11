@@ -1,7 +1,7 @@
-"""Minimal i18n — EN/FR strings + language persistence."""
+"""Minimal i18n — EN/FR strings + language persistence (via config.py)."""
 from __future__ import annotations
-import json
-import os
+
+from winairplay import config
 
 _STRINGS: dict[str, dict[str, str]] = {
     "en": {
@@ -38,63 +38,15 @@ LANGUAGES = list(_LANG_LABELS.keys())
 _current = "en"
 
 
-def _config_path() -> str:
-    base = os.environ.get("APPDATA", os.path.expanduser("~"))
-    folder = os.path.join(base, "WinAirPlay")
-    os.makedirs(folder, exist_ok=True)
-    return os.path.join(folder, "config.json")
-
-
 def load() -> None:
     global _current
-    try:
-        with open(_config_path(), encoding="utf-8") as f:
-            data = json.load(f)
-        lang = data.get("language", "en")
-        if lang in _STRINGS:
-            _current = lang
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        pass
+    lang = config.get_setting("language", "en")
+    if lang in _STRINGS:
+        _current = lang
 
 
 def save() -> None:
-    try:
-        path = _config_path()
-        try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            data = {}
-        data["language"] = _current
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except OSError:
-        pass
-
-
-def get_setting(key: str, default=None):
-    """Read an arbitrary persisted setting from config.json."""
-    try:
-        with open(_config_path(), encoding="utf-8") as f:
-            return json.load(f).get(key, default)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return default
-
-
-def set_setting(key: str, value) -> None:
-    """Persist an arbitrary setting into config.json (merge, never clobber)."""
-    try:
-        path = _config_path()
-        try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            data = {}
-        data[key] = value
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except OSError:
-        pass
+    config.set_setting("language", _current)
 
 
 def get_language() -> str:

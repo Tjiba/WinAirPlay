@@ -1,5 +1,4 @@
 import ipaddress
-import socket
 import threading
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional
@@ -17,6 +16,7 @@ class AirPlayDevice:
     port: int
     et: str = ""    # encryption types from TXT record (e.g. "0,3,5")
     md: str = ""    # metadata types from TXT record (e.g. "0,1,2")
+    id: str = ""    # unique mDNS service id ("AABBCC@Name") — display names collide
 
     def __str__(self) -> str:
         return f"{self.name} ({self.host}:{self.port})"
@@ -66,21 +66,27 @@ class DeviceDiscovery:
         name: str,
         state_change: ServiceStateChange,
     ) -> None:
-        if state_change == ServiceStateChange.Added:
+        if state_change in (ServiceStateChange.Added, ServiceStateChange.Updated):
+            # Updated fires when a record changes — typically a new IP after a
+            # DHCP renewal. Re-resolve, or we keep streaming to the stale address.
             self._add_device(zeroconf, service_type, name)
         elif state_change == ServiceStateChange.Removed:
             raw = name.replace("." + service_type.rstrip("."), "").rstrip(".")
-            self._remove_device(_parse_service_name(raw))
+            self._remove_device(raw)
 
     def _add_device(self, zeroconf: Zeroconf, service_type: str, name: str) -> None:
         info = ServiceInfo(service_type, name)
         if not info.request(zeroconf, timeout=3000):
             return
-        if not info.addresses:
+        addrs = info.parsed_addresses()
+        if not addrs:
             return
-        addrs = [socket.inet_ntoa(a) for a in info.addresses]
-        non_ll = [a for a in addrs if not ipaddress.ip_address(a).is_link_local]
-        host = non_ll[0] if non_ll else addrs[0]
+        # Routable IPv4 first (pyatv connects by IPv4), then routable IPv6,
+        # link-local entries last.
+        def _pref(a: str):
+            ip = ipaddress.ip_address(a)
+            return (ip.is_link_local, ip.version != 4)
+        host = min(addrs, key=_pref)
         port = info.port
         raw = name.replace("." + service_type.rstrip("."), "").rstrip(".")
         display_name = _parse_service_name(raw)
@@ -95,12 +101,13 @@ class DeviceDiscovery:
             port=port,
             et=_prop("et"),
             md=_prop("md"),
+            id=raw,
         )
         with self._lock:
-            self._devices[display_name] = device
+            self._devices[raw] = device
         self._on_change(self.devices)
 
-    def _remove_device(self, display_name: str) -> None:
+    def _remove_device(self, service_id: str) -> None:
         with self._lock:
-            self._devices.pop(display_name, None)
+            self._devices.pop(service_id, None)
         self._on_change(self.devices)

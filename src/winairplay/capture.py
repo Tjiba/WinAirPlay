@@ -105,6 +105,10 @@ class AudioCapture:
             self._stream = None
         logging.info("[Capture] Stream closed")
 
+    def set_device_index(self, index: Optional[int]) -> None:
+        """Select which loopback device the NEXT start() opens (None = default)."""
+        self._device_index = index
+
     def list_loopback_devices(self) -> list:
         """Enumerate loopback devices using the live _pa instance (thread-safe)."""
         try:
@@ -165,12 +169,12 @@ class AudioCapture:
                     stale = avail - self._chunk_frames
                     stream.read(stale, exception_on_overflow=False)  # drop stale, keep freshest
                     self._rs_primed = False  # re-prime resampler across the discontinuity
-                    logging.info("[Capture] DIAG resync: dropped %d stale frames (avail=%d, resuming=%s)",
-                                 stale, avail, resuming)
+                    logging.debug("[Capture] resync: dropped %d stale frames (avail=%d, resuming=%s)",
+                                  stale, avail, resuming)
                 raw = stream.read(self._chunk_frames, exception_on_overflow=False)
-                if resuming:  # DIAG: real audio came back after a silence gap
-                    logging.info("[Capture] DIAG audio RESUMED after %.1fs silent (avail=%d)",
-                                 time.monotonic() - self._silence_since, avail)
+                if resuming:  # real audio came back after a silence gap
+                    logging.debug("[Capture] audio resumed after %.1fs silent (avail=%d)",
+                                  time.monotonic() - self._silence_since, avail)
                     self._in_silence = False
                 if self._format and self._format.needs_resample:
                     return self._resample(raw)
@@ -185,8 +189,8 @@ class AudioCapture:
             if self._in_silence or time.monotonic() >= deadline:
                 now = time.monotonic()
                 if not self._in_silence:  # entered a silence gap (pause/idle)
-                    logging.info("[Capture] DIAG entering SILENCE (no loopback data >%.0fms, avail=%d)",
-                                 IDLE_SILENCE_AFTER_S * 1000, avail)
+                    logging.debug("[Capture] entering silence (no loopback data >%.0fms, avail=%d)",
+                                  IDLE_SILENCE_AFTER_S * 1000, avail)
                     self._in_silence = True
                     self._silence_since = now
                     self._silence_deadline = now   # anchor real-time pacing to now

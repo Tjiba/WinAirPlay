@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="WinAirPlayTransparent.png" width="80" />
+  <img src="assets/WinAirPlayTransparent.png" width="80" />
   <h1>WinAirPlay</h1>
   <p>Stream Windows audio to Apple TV, HomePod or any AirPlay speaker.<br/>No subscription. No setup. One double-click.</p>
 
@@ -31,8 +31,8 @@
 ## For Developers
 
 ```powershell
-pip install -r requirements.txt
-python main.py          # run from source
-python -m pytest tests/ # run tests
+pip install -e .[dev]   # install package + dev tools
+python -m winairplay    # run from source
+python -m pytest        # run tests
 python build.py         # build WinAirPlay.exe → dist\
 ```

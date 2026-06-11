@@ -1,13 +1,10 @@
 import asyncio
 import struct
-import sys
-import os
 import threading
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from raop import (
+from winairplay.raop import (
     RAOPClient,
     _StreamFeeder,
     _streaming_wav_header,
@@ -206,15 +203,70 @@ class TestStreamFeeder:
         assert bytes(buf1 + buf2) == b"\x01\x02\x03\x04"
 
 
+class TestPyatvPatchTargets:
+    """winairplay.raop.py monkeypatches pyatv internals to reach sub-250ms latency. These
+    guards fail loudly if a pyatv upgrade renames/moves the patched symbols —
+    instead of the latency slider silently turning into a no-op."""
+
+    def test_stream_context_reset_is_patched(self):
+        from pyatv.protocols.raop.protocols import StreamContext
+        from winairplay import raop as raop_mod
+        assert StreamContext.reset is raop_mod._low_latency_reset
+        assert callable(raop_mod._orig_sc_reset)
+
+    def test_rtsp_setup_is_patched(self):
+        from pyatv.support.rtsp import RtspSession
+        from winairplay import raop as raop_mod
+        assert RtspSession.setup is raop_mod._patched_rtsp_setup
+        assert callable(raop_mod._orig_rtsp_setup)
+
+    def test_reset_applies_configured_latency(self):
+        from pyatv.protocols.raop.protocols import StreamContext
+        from winairplay import raop as raop_mod
+        ctx = StreamContext()
+        ctx.reset()
+        assert ctx.latency == raop_mod._raop_latency_samples
+
+
+class TestRAOPClientPublicAPI:
+    def test_is_alive_reflects_internal_flag(self):
+        c = RAOPClient()
+        assert c.is_alive is False
+        c._alive = True
+        assert c.is_alive is True
+
+    def test_is_streaming_requires_alive_and_proc(self):
+        c = RAOPClient()
+        assert c.is_streaming is False
+        c._alive = True
+        assert c.is_streaming is False   # no stream task yet
+        c._proc = object()
+        assert c.is_streaming is True
+
+    def test_wait_ready_true_once_ready(self):
+        c = RAOPClient()
+        c._ready.set()
+        assert c.wait_ready(timeout=0.1) is True
+
+    def test_wait_ready_times_out_false(self):
+        c = RAOPClient()
+        assert c.wait_ready(timeout=0.05) is False
+
+    def test_no_del_hook(self):
+        """__del__ joined threads (up to ~11s) during GC/interpreter shutdown —
+        explicit disconnect paths (quit/evict/atexit) cover every case."""
+        assert "__del__" not in RAOPClient.__dict__
+
+
 class TestRAOPClient:
     def _patched_connect(self, client: RAOPClient, host="192.168.1.1", port=7000):
         """Call client.connect() with all heavy dependencies mocked."""
         mock_loop = MagicMock()
         mock_loop.is_running.return_value = False
-        with patch("raop.asyncio.new_event_loop", return_value=mock_loop), \
-             patch("raop.FileStorage"), \
-             patch("raop.asyncio.run_coroutine_threadsafe"), \
-             patch("raop.threading.Thread") as mock_thread_cls:
+        with patch("winairplay.raop.asyncio.new_event_loop", return_value=mock_loop), \
+             patch("winairplay.raop.FileStorage"), \
+             patch("winairplay.raop.asyncio.run_coroutine_threadsafe"), \
+             patch("winairplay.raop.threading.Thread") as mock_thread_cls:
             mock_thread_cls.return_value = MagicMock()
             client.connect(host, port, volume=60.0)
         return mock_loop
@@ -297,7 +349,7 @@ class TestRAOPClient:
         c._atv = MagicMock()
         c._loop = MagicMock()
         c._alive = False
-        with patch("raop.asyncio.run_coroutine_threadsafe") as run:
+        with patch("winairplay.raop.asyncio.run_coroutine_threadsafe") as run:
             c.set_volume(42.0)
             run.assert_not_called()
 
@@ -331,13 +383,13 @@ class TestRAOPClient:
         c._atv = mock_atv
         c._loop = mock_loop
         c._alive = True
-        with patch("raop.asyncio.run_coroutine_threadsafe") as mock_schedule:
+        with patch("winairplay.raop.asyncio.run_coroutine_threadsafe") as mock_schedule:
             c.set_volume(80.0)
             mock_schedule.assert_called_once()
 
     def test_set_volume_noop_when_not_alive(self):
         c = RAOPClient()
-        with patch("raop.asyncio.run_coroutine_threadsafe") as mock_schedule:
+        with patch("winairplay.raop.asyncio.run_coroutine_threadsafe") as mock_schedule:
             c.set_volume(80.0)
             mock_schedule.assert_not_called()
 
@@ -350,8 +402,8 @@ class TestRAOPClient:
         async def run():
             await c._stream_task("192.168.1.1", 7000, 50.0)
 
-        with patch("raop.pyatv.scan", new_callable=AsyncMock, return_value=[]), \
-             patch("raop.FileStorage"):
+        with patch("winairplay.raop.pyatv.scan", new_callable=AsyncMock, return_value=[]), \
+             patch("winairplay.raop.FileStorage"):
             c._storage = MagicMock()
             c._storage.load = AsyncMock()
             asyncio.run(run())

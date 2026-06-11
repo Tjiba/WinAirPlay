@@ -1,10 +1,7 @@
-import sys
-import os
 import numpy as np
 import pytest
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from capture import AudioCapture, AudioFormat
+from winairplay.capture import AudioCapture, AudioFormat
 
 
 class TestAudioFormat:
@@ -33,6 +30,16 @@ def _make_capture(fmt: AudioFormat) -> AudioCapture:
     cap._chunk_frames = 1024
     cap._reset_resampler()
     return cap
+
+
+class TestSetDeviceIndex:
+    def test_set_device_index_updates_lookup_target(self):
+        cap = object.__new__(AudioCapture)
+        cap._device_index = None
+        cap.set_device_index(4)
+        assert cap._device_index == 4
+        cap.set_device_index(None)
+        assert cap._device_index is None
 
 
 class TestResample:

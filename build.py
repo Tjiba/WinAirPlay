@@ -4,9 +4,10 @@ import subprocess
 import sys
 
 ROOT     = os.path.dirname(os.path.abspath(__file__))
+ASSETS   = os.path.join(ROOT, "assets")
 ICO      = os.path.join(ROOT, "WinAirPlay.ico")
-PNG      = os.path.join(ROOT, "WinAirPlayTransparent.png")
-PNG_ICON = os.path.join(ROOT, "WinAirPlayIcon.png")
+PNG      = os.path.join(ASSETS, "WinAirPlayTransparent.png")
+ENTRY    = os.path.join(ROOT, "src", "winairplay", "__main__.py")
 
 
 def make_ico() -> None:
@@ -24,8 +25,8 @@ def build() -> None:
         "--noconsole",       # no terminal window
         "--name", "WinAirPlay",
         f"--icon={ICO}",
-        f"--add-data={PNG};.",
-        f"--add-data={PNG_ICON};.",
+        f"--paths={os.path.join(ROOT, 'src')}",
+        f"--add-data={ASSETS};assets",
         "--collect-all=pyatv",          # pyatv has many dynamic imports
         "--collect-all=zeroconf",
         "--collect-all=cryptography",   # used by pyatv for pairing
@@ -36,7 +37,7 @@ def build() -> None:
         "--hidden-import=PIL._tkinter_finder",
         "--hidden-import=zeroconf._utils.ipaddress",
         "--hidden-import=zeroconf._handlers.answers",
-        "main.py",
+        ENTRY,
     ]
     print("  running PyInstaller…")
     result = subprocess.run(cmd, cwd=ROOT)

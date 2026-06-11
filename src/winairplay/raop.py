@@ -138,7 +138,7 @@ class _StreamFeeder(io.RawIOBase):
             self._peak_qsize = qs
         now = time.monotonic()
         if now - self._last_report >= 30.0:
-            logging.info(
+            logging.debug(
                 "[Feeder %s] queue peak=%d/%d over last 30s | flushes so far=%d | %.0fs since connect",
                 self._name, self._peak_qsize, self._MAX_QUEUE_CHUNKS,
                 self._flush_count, now - self._t0,
@@ -291,6 +291,20 @@ class RAOPClient:
             self._stream_task(host, port, volume), loop
         )
         logging.info("[PyATV] Connecting to %s:%d", host, port)
+
+    @property
+    def is_alive(self) -> bool:
+        """Connection considered live (set at connect, cleared on any death path)."""
+        return self._alive
+
+    @property
+    def is_streaming(self) -> bool:
+        """Live AND the stream task is running — safe to send_chunk()."""
+        return self._alive and self._proc is not None
+
+    def wait_ready(self, timeout: float) -> bool:
+        """Block until pyatv is connected and reading audio (or timeout)."""
+        return self._ready.wait(timeout=timeout)
 
     def send_chunk(self, pcm_data: bytes) -> None:
         if self._feeder and self._alive:
@@ -487,9 +501,3 @@ class RAOPClient:
             if self._loop and self._loop.is_running():
                 self._loop.call_soon_threadsafe(self._loop.stop)
             logging.info("[PyATV] Stream ended")
-
-    def __del__(self) -> None:
-        try:
-            self.disconnect()
-        except Exception:
-            pass

@@ -14,11 +14,12 @@ from typing import Optional, Dict, Set
 import pystray
 from PIL import Image
 
-import i18n
-from capture import AudioCapture, list_loopback_devices
-from raop import RAOPClient, set_raop_latency_ms, get_raop_latency_ms
-from discovery import DeviceDiscovery, AirPlayDevice
-from ui import PopupMenu
+from winairplay import config, i18n
+from winairplay.capture import AudioCapture, list_loopback_devices
+from winairplay.raop import RAOPClient, set_raop_latency_ms, get_raop_latency_ms
+from winairplay.discovery import DeviceDiscovery, AirPlayDevice
+from winairplay.resources import resource_path
+from winairplay.ui import PopupMenu
 
 _LOG_DIR = os.path.join(os.environ.get("APPDATA", "."), "WinAirPlay")
 os.makedirs(_LOG_DIR, exist_ok=True)
@@ -89,8 +90,7 @@ def _startup_cmd() -> str:
     if getattr(sys, "frozen", False):
         return f'"{sys.executable}"'
     pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-    script  = os.path.abspath(__file__)
-    return f'"{pythonw}" "{script}"'
+    return f'"{pythonw}" -m winairplay'
 
 
 def is_startup_enabled() -> bool:
@@ -146,7 +146,7 @@ def _apply_startmenu(enabled: bool) -> None:
             target, args = sys.executable, ""
         else:
             target = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-            args   = f'"{os.path.abspath(__file__)}"'
+            args   = "-m winairplay"
         workdir = os.path.dirname(target)
 
         os.makedirs(os.path.dirname(lnk), exist_ok=True)
@@ -163,13 +163,6 @@ def _apply_startmenu(enabled: bool) -> None:
         )
     except Exception as e:
         logging.warning("[StartMenu] %s", e)
-
-
-def _resource_path(name: str) -> str:
-    """Absolute path to a bundled resource. Works from source AND from a
-    PyInstaller --onefile exe (assets are extracted to sys._MEIPASS)."""
-    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base, name)
 
 
 def _enable_pro_audio_priority():
@@ -205,7 +198,7 @@ def _enable_pro_audio_priority():
 
 def _make_icon_image() -> Image.Image:
     try:
-        img = Image.open(_resource_path("WinAirPlayIcon.png")).convert("RGBA")
+        img = Image.open(resource_path("WinAirPlayIcon.png")).convert("RGBA")
         bbox = img.getbbox()
         if bbox:
             img = img.crop(bbox)
@@ -251,7 +244,7 @@ class WinAirPlay:
     def run(self) -> None:
         i18n.load()
         # Restore the saved RAOP latency (applies to every connection from now on)
-        set_raop_latency_ms(i18n.get_setting("latency_ms", get_raop_latency_ms()))
+        set_raop_latency_ms(config.get_setting("latency_ms", get_raop_latency_ms()))
         self._discovery.start()
         self._start_reconnect_thread()
 
@@ -357,14 +350,14 @@ class WinAirPlay:
         threading.Thread(target=self._toggle_device, args=(device,), daemon=True).start()
 
     def _toggle_device(self, device: AirPlayDevice) -> None:
-        name = device.name
+        key = device.id or device.name
         with self._lock:
-            if name in self._active_devices:
+            if key in self._active_devices:
                 # Disconnect this device
-                client = self._raop_clients.pop(name, None)
-                del self._active_devices[name]
-                self._reconnect_attempt_at.pop(name, None)
-                self._reconnect_fails.pop(name, None)
+                client = self._raop_clients.pop(key, None)
+                del self._active_devices[key]
+                self._reconnect_attempt_at.pop(key, None)
+                self._reconnect_fails.pop(key, None)
                 no_more = not self._raop_clients
                 if no_more:
                     self._streaming = False
@@ -372,10 +365,10 @@ class WinAirPlay:
                 # Connect this device
                 client  = None
                 no_more = False
-                vol     = self._client_volumes.get(name, DEFAULT_VOLUME)
+                vol     = self._client_volumes.get(key, DEFAULT_VOLUME)
                 c       = RAOPClient()
-                self._raop_clients[name]   = c
-                self._active_devices[name] = device
+                self._raop_clients[key]   = c
+                self._active_devices[key] = device
                 threading.Thread(
                     target=self._connect_and_stream, args=(device, c, vol), daemon=True
                 ).start()
@@ -388,7 +381,8 @@ class WinAirPlay:
         if no_more:
             with self._lock:
                 if not self._raop_clients:
-                    self._capture.stop()
+                    with self._capture_lock:
+                        self._capture.stop()
 
     def _connect_and_stream(self, device: AirPlayDevice, client: RAOPClient, volume: float) -> None:
         """Run in thread: connect, wait for ready, ensure audio loop is running."""
@@ -406,14 +400,14 @@ class WinAirPlay:
                     self._capture.start()
                 threading.Thread(target=self._audio_loop, daemon=True).start()
 
-        if not client._ready.wait(timeout=20):
+        if not client.wait_ready(timeout=20):
             logging.error("[Connect] Timeout: %s", device.name)
-            self._evict_client(device.name, client)
+            self._evict_client(device.id or device.name, client)
             return
 
-        if not client._alive:
+        if not client.is_alive:
             logging.error("[Connect] Failed: %s", device.name)
-            self._evict_client(device.name, client)
+            self._evict_client(device.id or device.name, client)
             return
 
         self._refresh_menu()
@@ -458,9 +452,9 @@ class WinAirPlay:
 
                 dead = []
                 for name, raop in snapshot:
-                    if raop._alive and raop._proc is not None:
+                    if raop.is_streaming:
                         raop.send_chunk(pcm)
-                    elif not raop._alive:
+                    elif not raop.is_alive:
                         dead.append(name)
 
                 if dead:
@@ -482,15 +476,15 @@ class WinAirPlay:
 
                 with self._lock:
                     if not self._raop_clients:
-                        logging.info("[AudioLoop] DIAG exit: no clients left (streaming=%s, stop=%s)",
-                                     self._streaming, self._stop_event.is_set())
+                        logging.debug("[AudioLoop] exit: no clients left (streaming=%s, stop=%s)",
+                                      self._streaming, self._stop_event.is_set())
                         self._streaming = False
                         break
 
             if not self._streaming:
-                logging.info("[AudioLoop] DIAG exit: _streaming cleared externally")
+                logging.debug("[AudioLoop] exit: _streaming cleared externally")
             if self._stop_event.is_set():
-                logging.info("[AudioLoop] DIAG exit: stop_event set")
+                logging.debug("[AudioLoop] exit: stop_event set")
         except Exception:
             logging.exception("[AudioLoop] Error")
         finally:
@@ -499,7 +493,7 @@ class WinAirPlay:
             # (e.g. capture OSError). Disconnect them so the reconnect loop can
             # re-establish cleanly; otherwise _alive=True would suppress reconnect.
             with self._lock:
-                stranded = {n: c for n, c in self._raop_clients.items() if c._alive}
+                stranded = {n: c for n, c in self._raop_clients.items() if c.is_alive}
                 for n in stranded:
                     self._raop_clients.pop(n, None)
                 if not self._raop_clients:
@@ -538,36 +532,9 @@ class WinAirPlay:
         threading.Thread(target=self._do_input_select, args=(idx, name), daemon=True).start()
 
     def _do_input_select(self, idx: Optional[int], name: str) -> None:
-        logging.info("[Trigger] DIAG _do_input_select idx=%s name=%s", idx, name)
-        with self._lock:
-            was_streaming = self._streaming
-            to_restart    = dict(self._active_devices)
-            clients_old   = list(self._raop_clients.values())
-            self._raop_clients.clear()
-            self._streaming = False
-
-        for c in clients_old:
-            try: c.disconnect()
-            except Exception: pass
-        if was_streaming:
-            self._audio_loop_done.wait(timeout=3.0)
-            with self._capture_lock:
-                self._capture.stop()
-
-        with self._lock:
-            self._capture._device_index = self._input_device_index
-
-        for dname, device in to_restart.items():
-            vol    = self._client_volumes.get(dname, DEFAULT_VOLUME)
-            client = RAOPClient()
-            with self._lock:
-                self._raop_clients[dname]   = client
-                self._active_devices[dname] = device
-            threading.Thread(
-                target=self._connect_and_stream, args=(device, client, vol), daemon=True
-            ).start()
-
-        self._refresh_menu()
+        logging.debug("[Trigger] _do_input_select idx=%s name=%s", idx, name)
+        self._restart_all_streams(
+            after_teardown=lambda: self._capture.set_device_index(idx))
 
     # ------------------------------------------------------------------ latency
 
@@ -575,16 +542,20 @@ class WinAirPlay:
         """UI slider (debounced) → persist + apply. RAOP latency is set at stream
         setup, so we restart active streams to make it audible immediately."""
         set_raop_latency_ms(ms)
-        i18n.set_setting("latency_ms", get_raop_latency_ms())
+        config.set_setting("latency_ms", get_raop_latency_ms())
         with self._lock:
             has_active = bool(self._raop_clients)
         if has_active:
             threading.Thread(target=self._restart_active_streams, daemon=True).start()
 
     def _restart_active_streams(self) -> None:
-        """Disconnect every active client and reconnect it (same device/volume).
-        Used to apply a new latency. Mirrors _do_input_select minus the device swap."""
-        logging.info("[Trigger] DIAG _restart_active_streams (latency=%.0fms)", get_raop_latency_ms())
+        logging.debug("[Trigger] restart streams (latency=%.0fms)", get_raop_latency_ms())
+        self._restart_all_streams()
+
+    def _restart_all_streams(self, after_teardown=None) -> None:
+        """Disconnect every active client, then reconnect each one (same device,
+        same volume). `after_teardown` runs once capture is fully stopped — used
+        by the input switch to swap the capture device before streams come back."""
         with self._lock:
             was_streaming = self._streaming
             to_restart    = dict(self._active_devices)
@@ -600,12 +571,15 @@ class WinAirPlay:
             with self._capture_lock:
                 self._capture.stop()
 
-        for dname, device in to_restart.items():
-            vol    = self._client_volumes.get(dname, DEFAULT_VOLUME)
+        if after_teardown is not None:
+            after_teardown()
+
+        for key, device in to_restart.items():
+            vol    = self._client_volumes.get(key, DEFAULT_VOLUME)
             client = RAOPClient()
             with self._lock:
-                self._raop_clients[dname]   = client
-                self._active_devices[dname] = device
+                self._raop_clients[key]   = client
+                self._active_devices[key] = device
             threading.Thread(
                 target=self._connect_and_stream, args=(device, client, vol), daemon=True
             ).start()
@@ -625,8 +599,8 @@ class WinAirPlay:
                     self._reconnect_fails.pop(name, None)
 
         if disappeared:
-            logging.info("[Trigger] DIAG devices disappeared from mDNS: %s",
-                         [n for n, _ in disappeared])
+            logging.debug("[Trigger] devices disappeared from mDNS: %s",
+                          [n for n, _ in disappeared])
         for name, client in disappeared:
             if client:
                 threading.Thread(target=client.disconnect, daemon=True).start()
@@ -650,7 +624,7 @@ class WinAirPlay:
                 to_reconnect = []
                 for name, dev in self._active_devices.items():
                     client = self._raop_clients.get(name)
-                    if client is not None and client._alive:
+                    if client is not None and client.is_alive:
                         continue  # connected, or a connect is still in flight
                     # Backoff: a device that keeps failing fast must not be
                     # hammered every 5s (that was the reconnect storm). A stream
