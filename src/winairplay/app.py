@@ -15,7 +15,7 @@ import pystray
 from PIL import Image
 
 from winairplay import config, i18n
-from winairplay.capture import AudioCapture, list_loopback_devices
+from winairplay.capture import AudioCapture, list_loopback_devices, DRIFT_MAX
 from winairplay.raop import RAOPClient, set_raop_latency_ms, get_raop_latency_ms
 from winairplay.discovery import DeviceDiscovery, AirPlayDevice
 from winairplay.resources import resource_path
@@ -48,6 +48,17 @@ sys.setswitchinterval(0.001)
 RECONNECT_INTERVAL    = 2
 RECONNECT_BACKOFF_MAX = 60     # cap (s) for a device that keeps failing to connect
 HEALTHY_STREAM_SECONDS = 30    # a stream alive this long resets the backoff
+
+# Adaptive clock-drift control (see AudioCapture.set_drift). The capture clock runs
+# ~100ppm FASTER than the device, so the feeder depth (= latency) only ever climbs
+# and eventually hits the 72-chunk cap = a 1.4s skip. We SHED ONLY (never stretch):
+# stretching to hold a target from a naturally-low fresh feeder just slowed the audio
+# and added latency. Shed is proportional to how far a smoothed depth sits above a
+# ceiling, so it stays 0 at rest and only kicks in once drift has actually piled up.
+DRIFT_CEILING_CHUNKS  = 16     # start shedding only above this (~0.37s) — rest stays low
+DRIFT_GAIN            = 5e-5   # rate shed per chunk of excess (→ ~100ppm at +2 chunks)
+DRIFT_EMA_ALPHA       = 0.05   # depth smoothing per tick (~20s constant) — ignore jitter
+DRIFT_ADJUST_INTERVAL = 1.0    # s between updates
 BUFFER_DURATION    = 2.0
 CHUNK_FRAMES       = 1024
 BYTES_PER_FRAME    = 4   # 2ch × 2 bytes
@@ -234,6 +245,12 @@ class WinAirPlay:
         self._reconnect_fails:      Dict[str, int]   = {}
         self._audio_loop_done = threading.Event()
         self._audio_loop_done.set()  # not running initially
+
+        # Adaptive drift state (persists across reconnects — the clock offset is stable)
+        self._drift = 0.0
+        self._depth_ema = 0.0
+        self._drift_next_adjust = 0.0
+        self._drift_next_log = 0.0
 
         self._input_device_index: Optional[int] = None
         self._input_device_name:  str           = "Default"
@@ -432,6 +449,30 @@ class WinAirPlay:
 
     # ------------------------------------------------------------------ audio loop
 
+    def _adjust_drift(self, snapshot) -> None:
+        """Shed the capture-vs-device clock drift that grows the feeder latency until a
+        1.4s QUEUE-FULL skip. SHED ONLY: proportional to how far a smoothed feeder depth
+        sits above DRIFT_CEILING_CHUNKS, clamped >= 0 — never stretch (that slowed the
+        audio from a naturally-low fresh feeder). Proportional, so it can't wind up."""
+        now = time.monotonic()
+        if now < self._drift_next_adjust:
+            return
+        self._drift_next_adjust = now + DRIFT_ADJUST_INTERVAL
+        # Paused source: the feeder depth reflects silence/resync, not clock drift.
+        if self._capture.is_idle():
+            return
+        depth = max((r.feeder_depth() for _, r in snapshot if r.is_streaming), default=-1)
+        if depth < 0:
+            return  # nothing streaming yet
+        # Smooth chunk-level jitter (0<->10 per chunk); the drift signal is a slow climb.
+        self._depth_ema += DRIFT_EMA_ALPHA * (depth - self._depth_ema)
+        self._drift = max(0.0, min(DRIFT_MAX, DRIFT_GAIN * (self._depth_ema - DRIFT_CEILING_CHUNKS)))
+        self._capture.set_drift(self._drift)
+        if now >= self._drift_next_log:
+            self._drift_next_log = now + 30.0
+            logging.info("[Drift] shed=%.1f ppm | feeder depth=%d (ema=%.1f, ceiling=%d)",
+                         self._drift * 1e6, depth, self._depth_ema, DRIFT_CEILING_CHUNKS)
+
     def _audio_loop(self) -> None:
         logging.info("[AudioLoop] Started")
         avrt, mmcss_handle = _enable_pro_audio_priority()
@@ -464,6 +505,8 @@ class WinAirPlay:
                         raop.send_chunk(pcm)
                     elif not raop.is_alive:
                         dead.append(name)
+
+                self._adjust_drift(snapshot)
 
                 if dead:
                     evicted = []

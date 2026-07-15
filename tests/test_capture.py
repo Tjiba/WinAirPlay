@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from winairplay.capture import AudioCapture, AudioFormat
+from winairplay.capture import AudioCapture, AudioFormat, DRIFT_MAX
 
 
 class TestAudioFormat:
@@ -28,8 +28,43 @@ def _make_capture(fmt: AudioFormat) -> AudioCapture:
     cap = object.__new__(AudioCapture)
     cap._format = fmt
     cap._chunk_frames = 1024
+    cap._drift = 0.0
     cap._reset_resampler()
     return cap
+
+
+class TestDrift:
+    def test_set_drift_clamps(self):
+        cap = object.__new__(AudioCapture)
+        cap._drift = 0.0
+        cap.set_drift(1.0)
+        assert cap._drift == DRIFT_MAX
+        cap.set_drift(-1.0)
+        assert cap._drift == -DRIFT_MAX
+        cap.set_drift(0.0001)
+        assert cap._drift == 0.0001
+
+    def test_positive_drift_sheds_frames(self):
+        """+drift trims the output rate → fewer frames than input → the AirPlay device
+        (playing at nominal 44100) catches up, draining the growing feeder latency."""
+        fmt = AudioFormat(sample_rate=44100, channels=2, sample_width=2)
+        frames = 4410
+        pcm = np.zeros(frames * 2, dtype=np.int16).tobytes()  # stereo
+        cap = _make_capture(fmt)
+        cap._drift = 0.001                                    # shed ~0.1%
+        out = np.frombuffer(cap._resample(pcm), dtype=np.int16)
+        out_frames = len(out) // 2
+        assert out_frames < frames                            # fewer than input = sheds
+        assert abs(out_frames - frames * (1 - 0.001)) < 3     # ~0.1% fewer
+
+    def test_zero_drift_native_is_passthrough_length(self):
+        fmt = AudioFormat(sample_rate=44100, channels=2, sample_width=2)
+        frames = 1024
+        pcm = np.arange(frames * 2, dtype=np.int16).tobytes()
+        cap = _make_capture(fmt)
+        cap._drift = 0.0
+        out = np.frombuffer(cap._resample(pcm), dtype=np.int16)
+        assert len(out) // 2 == frames                        # identity length at native rate
 
 
 class TestSetDeviceIndex:
@@ -148,6 +183,7 @@ class TestLiveResync:
         cap._format = None          # no resample → returns raw chunk
         cap._in_silence = False
         cap._silence_since = 0.0
+        cap._drift = 0.0
         cap._diag_last_report = 0.0
         cap._diag_resyncs = 0
         cap._diag_resync_frames = 0

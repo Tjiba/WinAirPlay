@@ -315,6 +315,12 @@ class RAOPClient:
         """Block until pyatv is connected and reading audio (or timeout)."""
         return self._ready.wait(timeout=timeout)
 
+    def feeder_depth(self) -> int:
+        """Current queued chunks = end-to-end latency proxy the drift loop reads.
+        0 if there is no feeder (never connected / torn down)."""
+        f = self._feeder
+        return f._q.qsize() if f is not None else 0
+
     def send_chunk(self, pcm_data: bytes) -> None:
         if self._feeder and self._alive:
             self._feeder.feed(pcm_data)

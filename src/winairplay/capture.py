@@ -26,6 +26,14 @@ POLL_INTERVAL_S = 0.002
 # next iterations (no gap), so this only governs when we give up and resync.
 RESYNC_DROP_CHUNKS = 3
 
+# Hard clamp on the adaptive clock-drift correction (see set_drift). The device
+# capture clock and the AirPlay device's playback clock run ~100ppm apart, so the
+# feeder queue slowly fills (growing latency / video desync) or drains (underrun).
+# A slow control loop in the audio thread nudges the effective output rate to hold
+# the feeder near a low setpoint. 0.5% is ~50x the measured drift and still far
+# below audibility (a semitone is ~6%), so a runaway loop can never pitch-shift.
+DRIFT_MAX = 0.005
+
 
 @dataclass
 class AudioFormat:
@@ -75,6 +83,9 @@ class AudioCapture:
         self._in_silence = False
         self._silence_since = 0.0
         self._silence_deadline = 0.0   # absolute monotonic target for real-time silence pacing
+        # Adaptive drift correction: fractional output-rate trim driven by the audio
+        # loop from the feeder depth (+ sheds samples when it fills, - adds when it drains).
+        self._drift = 0.0
         # --- glitch telemetry (throttled, ~1 line / 10s only when something fired) ---
         # These are the two capture-side events that cause an audible glitch WITHOUT
         # any other log trace: a mid-playback backlog resync (the audio thread got
@@ -125,6 +136,18 @@ class AudioCapture:
     def set_device_index(self, index: Optional[int]) -> None:
         """Select which loopback device the NEXT start() opens (None = default)."""
         self._device_index = index
+
+    def set_drift(self, drift: float) -> None:
+        """Set the fractional output-rate correction (clamped to ±DRIFT_MAX). Positive
+        sheds samples (use when the feeder is filling = capture outrunning the device);
+        negative adds them. Applied continuously from the next chunk via the resampler."""
+        self._drift = max(-DRIFT_MAX, min(DRIFT_MAX, drift))
+
+    def is_idle(self) -> bool:
+        """True while synthesizing silence (source paused). The feeder depth then
+        reflects pause/resume mechanics, not clock drift — the drift loop must not
+        wind the correction on it (that stretched audio on every pause/play)."""
+        return self._in_silence
 
     def list_loopback_devices(self) -> list:
         """Enumerate loopback devices using the live _pa instance (thread-safe)."""
@@ -200,7 +223,7 @@ class AudioCapture:
                     logging.debug("[Capture] audio resumed after %.1fs silent (avail=%d)",
                                   time.monotonic() - self._silence_since, avail)
                     self._in_silence = False
-                if self._format and self._format.needs_resample:
+                if self._format and (self._format.needs_resample or self._drift != 0.0):
                     return self._resample(raw)
                 return raw
             # Produce silence if we're ALREADY mid-pause (immediately — no 50ms
@@ -315,16 +338,21 @@ class AudioCapture:
             left = reshaped[:, 0].copy()
             right = reshaped[:, 1].copy()
 
-        # --- continuous sample-rate conversion ---
-        if fmt.sample_rate != TARGET_SAMPLE_RATE:
-            left, right = self._resample_rate(left, right, fmt.sample_rate)
+        # --- continuous sample-rate conversion (+ adaptive drift correction) ---
+        # Trim the target rate by the drift fraction: a lower effective target emits
+        # fewer frames, which the AirPlay device plays back at the nominal 44100 →
+        # imperceptibly faster → it catches up and the feeder stops filling.
+        effective_target = TARGET_SAMPLE_RATE / (1.0 + self._drift)
+        if fmt.sample_rate != effective_target:
+            left, right = self._resample_rate(left, right, fmt.sample_rate, effective_target)
 
         out = np.empty(len(left) * 2, dtype=np.float32)
         out[0::2] = left
         out[1::2] = right
         return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
 
-    def _resample_rate(self, left: np.ndarray, right: np.ndarray, src_rate: int):
+    def _resample_rate(self, left: np.ndarray, right: np.ndarray, src_rate: int,
+                       target_rate: float = TARGET_SAMPLE_RATE):
         """Stateful linear resampler, continuous across chunk boundaries.
 
         Each call carries the fractional read position and the previous block's
@@ -332,8 +360,9 @@ class AudioCapture:
         That removes the periodic boundary discontinuity AND keeps the long-term
         rate exact (e.g. 48000→44100 yields 940/941 frames alternating, averaging
         the true 940.8) — both prior sources of audible artifacts and slow drift.
+        target_rate carries the drift-corrected rate (slowly varying, ~44100).
         """
-        step = src_rate / TARGET_SAMPLE_RATE
+        step = src_rate / target_rate
         L = len(left)
         if L == 0:
             return left, right
