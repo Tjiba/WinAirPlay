@@ -371,6 +371,31 @@ class TestRAOPClient:
         assert c._alive is False
         assert c._loop is None
 
+    def test_disconnect_dead_client_force_stops_without_8s_wait(self):
+        """A client the device already dropped (connection_lost set _dead) must NOT
+        sit through the 8s graceful join — pyatv's teardown blocks on the dead socket
+        the whole time, and the zombie keeps holding the device's single RAOP slot,
+        which is exactly what makes the next reconnect fail and spiral. disconnect()
+        must force-stop the loop immediately instead."""
+        c = RAOPClient()
+        c._feeder = MagicMock()
+        c._dead = True
+        c._alive = True
+        c._proc = object()
+        mock_loop = MagicMock()
+        mock_loop.is_running.return_value = False
+        c._loop = mock_loop
+        mock_thread = MagicMock()
+        mock_thread.is_alive.return_value = False
+        c._loop_thread = mock_thread
+        c.disconnect()
+        # Forced the loop to stop right away rather than waiting for a graceful exit.
+        mock_loop.call_soon_threadsafe.assert_called_once_with(mock_loop.stop)
+        # And never issued the 8s graceful join (the zombie-hold window).
+        joins = [call.kwargs.get("timeout", call.args[0] if call.args else None)
+                 for call in mock_thread.join.call_args_list]
+        assert 8 not in joins
+
     def test_disconnect_noop_when_not_connected(self):
         c = RAOPClient()
         c.disconnect()  # must not raise

@@ -138,9 +138,13 @@ class _StreamFeeder(io.RawIOBase):
             self._peak_qsize = qs
         now = time.monotonic()
         if now - self._last_report >= 30.0:
-            logging.debug(
-                "[Feeder %s] queue peak=%d/%d over last 30s | flushes so far=%d | %.0fs since connect",
-                self._name, self._peak_qsize, self._MAX_QUEUE_CHUNKS,
+            # INFO (not debug) so a long session reveals the LATENCY TREND: 'now' is
+            # the queue floor = steady-state latency (~10 chunks/0.2s is normal). If it
+            # climbs over the session, capture is outrunning the device (clock drift) =
+            # the growing audio delay / video desync. 'peak' catches transient stalls.
+            logging.info(
+                "[Feeder %s] queue now=%d peak=%d/%d over 30s | flushes=%d | %.0fs since connect",
+                self._name, qs, self._peak_qsize, self._MAX_QUEUE_CHUNKS,
                 self._flush_count, now - self._t0,
             )
             self._peak_qsize = qs
@@ -243,6 +247,11 @@ class RAOPClient:
         self._atv = None
         self._feeder: Optional[_StreamFeeder] = None
         self._alive = False
+        # Set once the device drops/closes us (connection_lost/closed). A dead
+        # connection's socket is gone, so pyatv's teardown blocks the full 8s —
+        # disconnect() uses this to force-stop immediately and free the device's
+        # single RAOP slot right away instead of lingering as a zombie.
+        self._dead = False
         # Non-None sentinel: main.py checks this to detect a dead stream
         self._proc: Optional[object] = None
         # Set just before stream_file() starts — lets _audio_loop delay capture
@@ -327,7 +336,19 @@ class RAOPClient:
         if self._feeder:
             self._feeder.close_feed()  # sends EOF → stream_file() returns → finally stops loop
             self._feeder = None
-        if self._loop_thread:
+        if self._loop_thread and self._dead and loop is not None:
+            # The device already dropped us: the socket is gone, so pyatv's RTSP
+            # teardown blocks on it for the full 8s graceful window — during which
+            # this zombie keeps holding the device's single RAOP slot, which is what
+            # makes the very next reconnect fail ("Failed to set up remote control
+            # channel") and spiral into a reconnect storm. Don't wait: force the loop
+            # to stop now so the slot frees immediately for a clean reconnect.
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except Exception:
+                pass
+            self._loop_thread.join(timeout=3)
+        elif self._loop_thread:
             self._loop_thread.join(timeout=8)  # wait for _stream_task finally to stop the loop
             if self._loop_thread.is_alive() and loop is not None:
                 # pyatv teardown hung past the timeout. Force the event loop to
@@ -396,6 +417,7 @@ class RAOPClient:
         if self._alive:
             logging.warning("[PyATV] connection down (%s) — dropping for reconnect", reason)
         self._alive = False
+        self._dead = True
         self._proc = None
         # Unblock stream_file (blocked reading the feeder) so _stream_task returns
         # and its finally tears pyatv down cleanly for a fresh reconnect.
