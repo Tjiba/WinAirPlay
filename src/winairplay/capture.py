@@ -18,6 +18,14 @@ CHUNK_FRAMES = 1024
 IDLE_SILENCE_AFTER_S = 0.05
 POLL_INTERVAL_S = 0.002
 
+# Only drop the WASAPI backlog to the freshest chunk once it is this many chunks
+# deep. A 1-chunk lateness is normal desktop jitter (the audio thread briefly lost
+# the GIL/CPU — measured ~1.2 chunks); dropping there sliced ~23ms of audio every
+# time = the intermittent crackle. Above this, a real stall accumulated, so snap
+# back to live. The loop drains a sub-threshold backlog by reading it out over the
+# next iterations (no gap), so this only governs when we give up and resync.
+RESYNC_DROP_CHUNKS = 3
+
 
 @dataclass
 class AudioFormat:
@@ -67,7 +75,16 @@ class AudioCapture:
         self._in_silence = False
         self._silence_since = 0.0
         self._silence_deadline = 0.0   # absolute monotonic target for real-time silence pacing
-        self._diag_reads = 0
+        # --- glitch telemetry (throttled, ~1 line / 10s only when something fired) ---
+        # These are the two capture-side events that cause an audible glitch WITHOUT
+        # any other log trace: a mid-playback backlog resync (the audio thread got
+        # preempted → WASAPI ring backed up → we drop stale frames = a skip/click) and
+        # a silence injection during playback (the ring starved >IDLE_SILENCE_AFTER_S).
+        # Surfaced at INFO so the intermittent "grésille tout seul" leaves a trace.
+        self._diag_last_report = time.monotonic()
+        self._diag_resyncs = 0          # backlog resyncs while already playing
+        self._diag_resync_frames = 0    # stale frames dropped by those resyncs
+        self._diag_silence_injections = 0
 
     # ------------------------------------------------------------------ public
 
@@ -149,6 +166,7 @@ class AudioCapture:
         stream = self._stream
         if stream is None:
             raise OSError("capture stream is closed")
+        self._diag_report()
         chunk_dur = self._chunk_frames / TARGET_SAMPLE_RATE
         deadline = time.monotonic() + IDLE_SILENCE_AFTER_S
         while True:
@@ -163,12 +181,18 @@ class AudioCapture:
                 # replaying them right after the injected silence is exactly the blip/
                 # crackle heard on tab switch. In both cases, for a LIVE stream we want
                 # "now": drop everything older than the freshest chunk. We only do this
-                # on a real backlog (≥2 chunks) or on resume — never during steady
-                # playback (avail hovers ~1 chunk), so normal audio is untouched.
-                if avail > self._chunk_frames and (avail >= 2 * self._chunk_frames or resuming):
+                # on resume, or on a REAL backlog (≥RESYNC_DROP_CHUNKS) — a 1-chunk
+                # lateness is normal desktop jitter, drained by the next reads, so
+                # dropping it just sliced audio (the crackle). Steady playback (avail
+                # hovers ~1 chunk) never trips this.
+                big_backlog = avail >= RESYNC_DROP_CHUNKS * self._chunk_frames
+                if avail > self._chunk_frames and (big_backlog or resuming):
                     stale = avail - self._chunk_frames
                     stream.read(stale, exception_on_overflow=False)  # drop stale, keep freshest
                     self._rs_primed = False  # re-prime resampler across the discontinuity
+                    if big_backlog and not resuming:  # a real stall, not 1-chunk jitter
+                        self._diag_resyncs += 1
+                        self._diag_resync_frames += stale
                     logging.debug("[Capture] resync: dropped %d stale frames (avail=%d, resuming=%s)",
                                   stale, avail, resuming)
                 raw = stream.read(self._chunk_frames, exception_on_overflow=False)
@@ -189,6 +213,7 @@ class AudioCapture:
             if self._in_silence or time.monotonic() >= deadline:
                 now = time.monotonic()
                 if not self._in_silence:  # entered a silence gap (pause/idle)
+                    self._diag_silence_injections += 1
                     logging.debug("[Capture] entering silence (no loopback data >%.0fms, avail=%d)",
                                   IDLE_SILENCE_AFTER_S * 1000, avail)
                     self._in_silence = True
@@ -205,6 +230,23 @@ class AudioCapture:
                     time.sleep(sleep_for)
                 return self._silence_chunk()
             time.sleep(POLL_INTERVAL_S)
+
+    def _diag_report(self) -> None:
+        """Throttled: emit an INFO line only when a capture-side glitch fired in the
+        window. These are the events that glitch the audio WITHOUT any other log
+        trace, so this is how the intermittent 'grésille tout seul' becomes visible."""
+        if not (self._diag_resyncs or self._diag_silence_injections):
+            return
+        now = time.monotonic()
+        if now - self._diag_last_report < 10.0:
+            return
+        logging.info("[Capture] glitches (last %.0fs): %d preemption resync (%d frames dropped), "
+                     "%d silence injection", now - self._diag_last_report,
+                     self._diag_resyncs, self._diag_resync_frames, self._diag_silence_injections)
+        self._diag_last_report = now
+        self._diag_resyncs = 0
+        self._diag_resync_frames = 0
+        self._diag_silence_injections = 0
 
     def _silence_chunk(self) -> bytes:
         return b'\x00' * (self._chunk_frames * TARGET_CHANNELS * TARGET_SAMPLE_WIDTH)

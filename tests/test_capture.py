@@ -148,6 +148,10 @@ class TestLiveResync:
         cap._format = None          # no resample → returns raw chunk
         cap._in_silence = False
         cap._silence_since = 0.0
+        cap._diag_last_report = 0.0
+        cap._diag_resyncs = 0
+        cap._diag_resync_frames = 0
+        cap._diag_silence_injections = 0
         return cap
 
     def test_backlog_is_dropped_to_stay_live(self):
@@ -166,6 +170,16 @@ class TestLiveResync:
         out = self._cap(stream).read_chunk()
         assert len(out) == 1024 * 2 * 2
         assert stream.reads == [1024]              # single clean read, no resync drop
+
+    def test_no_drop_on_one_chunk_lateness(self):
+        """A ~1-chunk backlog mid-playback (avail = 2 chunks) is normal GIL/scheduling
+        jitter — the audio thread was briefly late. It must NOT drop (that sliced ~23ms
+        of audio every time = the intermittent crackle); the next reads drain it. Only
+        a backlog ≥ RESYNC_DROP_CHUNKS resyncs."""
+        stream = _FakeStream(avail_frames=2 * 1024)
+        out = self._cap(stream).read_chunk()
+        assert len(out) == 1024 * 2 * 2
+        assert stream.reads == [1024]              # read one chunk, left the rest — no drop
 
     def test_resume_drops_stale_subchunk_backlog(self):
         """On resume from a silence gap, even a SUB-2-chunk backlog is stale (the

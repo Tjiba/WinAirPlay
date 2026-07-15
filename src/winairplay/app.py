@@ -37,6 +37,14 @@ logging.basicConfig(
 # at WARNING.
 logging.getLogger('pyatv').setLevel(logging.WARNING)
 
+# Real-time audio: the capture/send loop shares the GIL with the pyatv, Tk and
+# reconnect threads. At the default 5ms switch interval a CPU-bound thread can hold
+# the GIL long enough to delay the capture read past a chunk period — the WASAPI
+# ring then backs up and we drop a slice (heard as intermittent crackle that gets
+# worse the busier the PC is). A shorter interval hands the GIL back to the waiting
+# audio thread sooner. Cheap; adds no latency.
+sys.setswitchinterval(0.001)
+
 RECONNECT_INTERVAL    = 2
 RECONNECT_BACKOFF_MAX = 60     # cap (s) for a device that keeps failing to connect
 HEALTHY_STREAM_SECONDS = 30    # a stream alive this long resets the backoff
@@ -400,7 +408,7 @@ class WinAirPlay:
                     self._capture.start()
                 threading.Thread(target=self._audio_loop, daemon=True).start()
 
-        if not client.wait_ready(timeout=20):
+        if not client.wait_ready(timeout=12):
             logging.error("[Connect] Timeout: %s", device.name)
             self._evict_client(device.id or device.name, client)
             return
