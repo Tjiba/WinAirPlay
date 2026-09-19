@@ -1,0 +1,50 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{8A880109-8C46-48BB-81EB-6C0B793EB6E4}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WinAirPlay.Core", "src\WinAirPlay.Core\WinAirPlay.Core.csproj", "{A561F113-4E3B-4A4A-AB6B-EE6310A999CE}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WinAirPlay", "src\winairplay\WinAirPlay.csproj", "{F826A44D-B987-477D-9132-E3C930B0EE61}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{85C47DEC-837D-4E06-B487-6CDF83DCE081}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WinAirPlay.Tests", "tests\WinAirPlay.Tests\WinAirPlay.Tests.csproj", "{E9586D8D-B664-42E7-931E-0D7D77852C3A}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WinAirPlay.UiTests", "tests\WinAirPlay.UiTests\WinAirPlay.UiTests.csproj", "{FCF45EC4-15B4-464F-BDBD-B26ED5AF0841}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{A561F113-4E3B-4A4A-AB6B-EE6310A999CE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A561F113-4E3B-4A4A-AB6B-EE6310A999CE}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A561F113-4E3B-4A4A-AB6B-EE6310A999CE}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A561F113-4E3B-4A4A-AB6B-EE6310A999CE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F826A44D-B987-477D-9132-E3C930B0EE61}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F826A44D-B987-477D-9132-E3C930B0EE61}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F826A44D-B987-477D-9132-E3C930B0EE61}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F826A44D-B987-477D-9132-E3C930B0EE61}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E9586D8D-B664-42E7-931E-0D7D77852C3A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E9586D8D-B664-42E7-931E-0D7D77852C3A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E9586D8D-B664-42E7-931E-0D7D77852C3A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E9586D8D-B664-42E7-931E-0D7D77852C3A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{FCF45EC4-15B4-464F-BDBD-B26ED5AF0841}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FCF45EC4-15B4-464F-BDBD-B26ED5AF0841}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FCF45EC4-15B4-464F-BDBD-B26ED5AF0841}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FCF45EC4-15B4-464F-BDBD-B26ED5AF0841}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{A561F113-4E3B-4A4A-AB6B-EE6310A999CE} = {8A880109-8C46-48BB-81EB-6C0B793EB6E4}
+		{F826A44D-B987-477D-9132-E3C930B0EE61} = {8A880109-8C46-48BB-81EB-6C0B793EB6E4}
+		{E9586D8D-B664-42E7-931E-0D7D77852C3A} = {85C47DEC-837D-4E06-B487-6CDF83DCE081}
+		{FCF45EC4-15B4-464F-BDBD-B26ED5AF0841} = {85C47DEC-837D-4E06-B487-6CDF83DCE081}
+	EndGlobalSection
+EndGlobal

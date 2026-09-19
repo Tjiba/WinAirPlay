@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net8.0</TargetFramework>
+    </PropertyGroup>
+    <ItemGroup>
+        <ProjectReference Include="../../src/WinAirPlay.Core/WinAirPlay.Core.csproj" />
+        <Content Include="../../native/bin/winairplay_audio.dll" Link="winairplay_audio.dll" CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+</Project>

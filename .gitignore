@@ -1,31 +1,13 @@
-# Python
-__pycache__/
-*.pyc
-*.pyo
-.pytest_cache/
-
-# Virtualenvs
-.venv/
-venv/
-env/
-*.egg-info/
-
-# Build output
-dist/
+# Build output and local migration backups
 build/
-*.spec
-WinAirPlay.ico
-
-# Logs (runtime winairplay.log, build logs, scratch)
+dist/
+**/bin/
+**/obj/
 *.log
+*.pdb
 
-# graphify (knowledge-graph cache/output — regenerated locally)
+# Local tools and editors
 graphify-out/
-
-# Claude Code internals
-docs/
 .claude/
-
-# IDE
 .vscode/
 .idea/
