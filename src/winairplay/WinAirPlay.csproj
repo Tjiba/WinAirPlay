@@ -8,6 +8,7 @@
         <Product>WinAirPlay</Product>
         <Description>Stream Windows audio to AirPlay speakers.</Description>
         <Copyright>Copyright (c) 2026 Timo</Copyright>
+        <PackageLicenseExpression>GPL-3.0-only</PackageLicenseExpression>
     </PropertyGroup>
     <ItemGroup>
         <ProjectReference Include="../WinAirPlay.Core/WinAirPlay.Core.csproj" />

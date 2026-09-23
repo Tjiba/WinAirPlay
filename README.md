@@ -57,4 +57,4 @@ Turn off **Launch at Windows startup**, choose **Quit**, then delete the portabl
 
 Build instructions, diagnostics and protocol details: [Development guide](https://github.com/Tjiba/WinAirPlay/blob/main/docs/DEVELOPMENT.md).
 
-[MIT license](LICENSE).
+Copyright (c) 2026 Timo. Licensed under the [GNU GPL v3.0](LICENSE) (`GPL-3.0-only`).

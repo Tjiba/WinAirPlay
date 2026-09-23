@@ -71,7 +71,7 @@ from Git.
 - [RTP streams](https://openairplay.github.io/airplay-spec/audio/rtp_streams.html)
 - [AirPlay 2 sequence and clocks](https://github.com/music-assistant/airplay-cli/blob/main/DESIGN.md)
 
-[MIT license](../LICENSE).
+[GNU GPL v3.0](../LICENSE) (`GPL-3.0-only`).
 
 
 ## Release packaging
