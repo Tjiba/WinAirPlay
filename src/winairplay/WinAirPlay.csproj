@@ -5,6 +5,9 @@
         <UseWindowsForms>true</UseWindowsForms>
         <ApplicationIcon>../../assets/WinAirPlay.ico</ApplicationIcon>
         <Version>2.0.0</Version>
+        <Product>WinAirPlay</Product>
+        <Description>Stream Windows audio to AirPlay speakers.</Description>
+        <Copyright>Copyright (c) 2026 Timo</Copyright>
     </PropertyGroup>
     <ItemGroup>
         <ProjectReference Include="../WinAirPlay.Core/WinAirPlay.Core.csproj" />

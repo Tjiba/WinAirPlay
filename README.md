@@ -1,122 +1,60 @@
-# WinAirPlay 2
+# WinAirPlay
 
-Windows system audio streaming to AirPlay speakers. C# / .NET 8 / WinForms,
-native C++ / WASAPI capture and a direct AirPlay implementation. No Python,
-pyatv or external audio process is required.
+Play Windows audio on your HomePods and AirPlay speakers.
 
-## Usage
+A small app in your system tray, with a compact speaker menu and shared or individual volume controls.
 
-1. Extract `dist/WinAirPlay2-win-x64.zip`.
-2. Keep `WinAirPlay.exe` and `winairplay_audio.dll` together.
-3. Open the app. Select the Windows audio output in **Settings**.
-4. Click **Listen** on each speaker you want to connect.
+**[Download WinAirPlay.exe](https://github.com/Tjiba/WinAirPlay/releases/latest/download/WinAirPlay.exe)** · [All releases](https://github.com/Tjiba/WinAirPlay/releases)
 
-Multiple speakers can play simultaneously. **Disconnect** stops only that
-speaker; **Disconnect all** in the tray menu stops every connection, including
-pending ones. Failed or cancelled connections do not stop other speakers.
-The compact menu has a shared volume slider by default. In **Settings**, uncheck
-**Use the same volume for all HomePods** to show one slider per speaker, without
-changing PC volume. Individual levels and the selected mode are saved. Returning
-to shared mode applies the global level to all sessions; switching back restores
-each speaker's individual level.
+## Get started
 
-A left click on the tray icon opens or brings forward the dark dashboard. A right click opens
-the quick menu. Closing or minimizing the window keeps playback running by
-default; use **Quit** to exit. Startup and close behavior are configurable in
-**Settings**. Disconnect all speakers before changing the source or latency.
+1. Download **WinAirPlay.exe** and keep it in a permanent folder.
+2. Open it. No separate .NET installation or DLL is needed.
+3. Connect your PC and speakers to the same local network.
+4. Click **Listen** next to a speaker. Repeat to play on more than one.
 
-After building, run `./Install.ps1` to install under `%LOCALAPPDATA%/Programs/WinAirPlay`
-and add WinAirPlay to Windows Start search. Enable **Launch at Windows startup**
-in Settings to launch at sign-in. **Start minimized to the system tray** controls
-whether the window appears. Opening WinAirPlay again brings the existing window forward.
+Requires Windows 10 or 11, 64-bit Intel/AMD. Allow WinAirPlay through Windows Firewall on your private network if prompted.
 
-The PC and speakers must share a network. Allow incoming mDNS, clock and
-retransmission traffic through Windows Firewall for the app executable.
+The executable is not code-signed. Windows may display an unknown-publisher warning.
 
-## Compatibility and latency
+For a Start menu shortcut, download **WinAirPlay-win-x64.zip**, extract everything, then double-click **Install.cmd**. This installs for your Windows account without administrator access. Quit an existing copy before updating.
 
-Supported receivers accept AirPlay 2 transient pairing, NTP timing and stereo
-16-bit / 44.1 kHz PCM. Permanent PIN pairing, password entry in the UI and legacy
-AirPlay 1 receivers are not implemented.
+## Everyday controls
 
-Each speaker has an independent session and capture of the same Windows output.
-Playback is simultaneous, but this is **not a synchronized AirPlay group**:
-audible offsets between speakers remain possible.
+- **Tray icon:** left-click to open the menu in the bottom-right corner; right-click for more actions.
+- **Stop:** disconnect one speaker. **Stop all:** disconnect every speaker.
+- **Volume:** use the shared slider, or uncheck **Settings → Use the same volume for all HomePods** for a slider per speaker. Individual levels are remembered.
+- **Add:** enter a speaker's IP address if it does not appear automatically.
+- **× / Esc:** hide the menu while audio keeps playing. Right-click the tray icon and choose **Quit** to exit.
 
-**100 ms is the default target, not measured end-to-end latency.** Capture aims
-to retain about 20 ms and advertises the remaining delay to the receiver. A
-higher receiver-reported minimum is honored and logged. Speakers can add their
-own delay; sender statistics do not establish acoustic or video synchronization.
+## Settings
 
-## Architecture
+Choose the Windows audio output to capture and the target latency. Disconnect all speakers before changing either.
 
-- `src/winairplay`: dashboard, settings, tray and independent connection states.
-- `src/WinAirPlay.Core`: mDNS, SRP-6a, encrypted RTSP, binary plist, NTP, encrypted
-  RTP, retransmission cache and timed sending.
-- `native`: WASAPI capture on an MMCSS thread, preallocated PCM buffer and
-  gradual drift correction using a 64-tap windowed sinc interpolator.
+Enable **Launch at Windows startup** to launch at sign-in. Enable **Start minimized to the system tray** to keep the menu hidden when the app starts. Keep the executable in the same location after enabling startup, or reinstall and save the setting again.
 
-Each packet contains 352 frames, approximately 8 ms of audio. The sender uses
-QPC and a high-resolution Windows timer. Startup waits for captured samples
-rather than assuming a fixed sleep filled the buffer. Silent rendering keeps
-the output clock active during pauses. The engine does not discard queued
-samples or invent silence to conceal capture failures.
+## Troubleshooting
 
-Settings: `%LOCALAPPDATA%/WinAirPlay/settings-v2.json`.
-Logs: `%LOCALAPPDATA%/WinAirPlay/native-v2.log`, rotated at approximately 2 MB
-with one previous file retained. Session entries identify the speaker name and
-address. Metrics include send intervals, PCM reserve, applied drift, capture
-discontinuities, missed playback deadlines and retransmission requests/misses.
-Audio and pairing secrets are not recorded.
+**No speakers appear:** check that the PC and speakers are on the same network, not an isolated guest network. Check the private-network firewall permission, or try **Add** with the speaker's IP address.
 
-## Build and tests
+**No sound:** check the selected **Audio source**, Windows playback, and speaker volume. Then stop and reconnect the speaker.
 
-Requires Windows x64, PowerShell and the .NET 8 SDK.
+**Audio delay or interruptions:** try a higher target latency in Settings. The default 100 ms is a target, not a guarantee of total audible delay.
 
-```powershell
-./Build.ps1
-```
+**Need logs:** right-click the tray icon → **Open log**. Settings and logs are stored in `%LOCALAPPDATA%\WinAirPlay`.
 
-The script downloads Zig 0.14.1 if needed, verifies its published SHA-256,
-compiles the native engine, runs native buffer/spectral tests, builds the solution
-and runs managed protocol tests. It publishes the self-contained executable,
-native DLL and ZIP into `dist`. `-SkipPublish` runs the build and tests without
-publishing. Builds do not connect to speakers.
+## Compatibility
 
-```powershell
-# Protocol tests, without network or audio capture
-dotnet run --project tests/WinAirPlay.Tests -c Release
+HomePods and compatible AirPlay 2 speakers are supported. Legacy AirPlay 1, permanent PIN pairing and password entry are not supported.
 
-# Ten seconds of WASAPI capture, without recording or transmission
-dotnet run --project tests/WinAirPlay.Tests -c Release -- --capture
+Multiple speakers use independent connections. They can play together, but this is not a synchronized AirPlay group: audible offsets between rooms are possible.
 
-# Pairing and session setup, without audio
-./dist/WinAirPlay.exe --probe SPEAKER_IP PORT
+## Remove WinAirPlay
 
-# Fifteen seconds of real PC audio, 100 ms target and 50% volume
-./dist/WinAirPlay.exe --stream-test SPEAKER_IP PORT
+Turn off **Launch at Windows startup**, choose **Quit**, then delete the portable executable or the installed folder at `%LOCALAPPDATA%\Programs\WinAirPlay`. If installed, remove the WinAirPlay shortcut from the Start menu. Delete `%LOCALAPPDATA%\WinAirPlay` only if you also want to remove saved settings and logs.
 
-# Optional live UI test: quit the app first; two distinct speakers on port 7000
-dotnet run --project tests/WinAirPlay.UiTests -c Release -- SPEAKER_IP_1 SPEAKER_IP_2
-```
+## Development
 
-The executable diagnostics write to `%LOCALAPPDATA%/WinAirPlay/probe-v2.log`.
-The UI test streams real audio at the saved source, volume and latency settings.
-It checks adding a second speaker, tray state, failure isolation, individual
-disconnect, cancellation and disconnecting all while a connection is pending.
-It restores local settings on normal completion and saves a dashboard image in
-`build/ui-tests/`. Its executable needs incoming AirPlay UDP allowed through the
-firewall, just like the app. A test pass does not verify audible quality or
-inter-speaker synchronization.
-
-Local migration backups and build tools remain under ignored `build/`; they
-are not shipped. Generated executables, logs and compiler caches are excluded
-from Git.
-
-## Protocol references
-
-- [HomeKit based pairings](https://openairplay.github.io/airplay-spec/pairing/hkp.html)
-- [RTP streams](https://openairplay.github.io/airplay-spec/audio/rtp_streams.html)
-- [AirPlay 2 sequence and clocks](https://github.com/music-assistant/airplay-cli/blob/main/DESIGN.md)
+Build instructions, diagnostics and protocol details: [Development guide](https://github.com/Tjiba/WinAirPlay/blob/main/docs/DEVELOPMENT.md).
 
 [MIT license](LICENSE).

@@ -28,9 +28,13 @@ Invoke-Checked (Join-Path $PSScriptRoot 'build/audio_buffer_test.exe') @()
 Invoke-Checked 'dotnet' @('build', 'WinAirPlay.sln', '-c', 'Release')
 Invoke-Checked 'dotnet' @('run', '--project', 'tests/WinAirPlay.Tests', '-c', 'Release', '--no-build')
 if (!$SkipPublish) {
-    Invoke-Checked 'dotnet' @('publish', 'src/winairplay/WinAirPlay.csproj', '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true', '-p:PublishSingleFile=true', '-p:DebugType=None', '-o', 'dist/WinAirPlay2')
-    Copy-Item -LiteralPath 'dist/WinAirPlay2/WinAirPlay.exe' -Destination 'dist/WinAirPlay.exe' -Force
-    Copy-Item -LiteralPath 'native/bin/winairplay_audio.dll' -Destination 'dist/winairplay_audio.dll' -Force
+    Invoke-Checked 'dotnet' @('publish', 'src/winairplay/WinAirPlay.csproj', '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true', '-p:PublishSingleFile=true', '-p:IncludeAllContentForSelfExtract=true', '-p:EnableCompressionInSingleFile=true', '-p:DebugType=None', '-o', 'build/publish')
+    New-Item -ItemType Directory -Force -Path 'dist' | Out-Null
+    Copy-Item -LiteralPath 'build/publish/WinAirPlay.exe' -Destination 'dist/WinAirPlay.exe' -Force
     Copy-Item -LiteralPath 'LICENSE' -Destination 'dist/LICENSE' -Force
-    Compress-Archive -Path 'dist/WinAirPlay.exe', 'dist/winairplay_audio.dll', 'dist/LICENSE' -DestinationPath 'dist/WinAirPlay2-win-x64.zip' -Force
+    Copy-Item -LiteralPath 'Install.ps1', 'Install.cmd', 'README.md' -Destination 'dist' -Force
+    Compress-Archive -Path 'dist/WinAirPlay.exe', 'dist/LICENSE', 'dist/Install.ps1', 'dist/Install.cmd', 'dist/README.md' -DestinationPath 'dist/WinAirPlay-win-x64.zip' -Force
+    Get-FileHash -LiteralPath 'dist/WinAirPlay.exe', 'dist/WinAirPlay-win-x64.zip' -Algorithm SHA256 |
+        ForEach-Object { $_.Hash.ToLowerInvariant() + '  ' + (Split-Path $_.Path -Leaf) } |
+        Set-Content -LiteralPath 'dist/SHA256SUMS.txt' -Encoding ascii
 }

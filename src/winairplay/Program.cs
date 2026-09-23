@@ -6,6 +6,11 @@ internal static class Program
     private static int Main(string[] args)
     {
         System.Globalization.CultureInfo.DefaultThreadCurrentUICulture = System.Globalization.CultureInfo.GetCultureInfo("en-US");
+        if (args is ["--check-runtime"])
+        {
+            try { return Core.NativeAudio.wa_version() == 2 && Core.NativeAudio.Devices().Count > 0 ? 0 : 1; }
+            catch { return 1; }
+        }
         if (args.Length >= 2 && args[0] is "--probe" or "--stream-test")
         {
             Directory.CreateDirectory(Settings.Folder);
