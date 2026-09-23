@@ -27,7 +27,11 @@ internal static class Program
             catch (Exception error) { Log(error.ToString()); return 1; }
         }
         using var mutex = new Mutex(true, "Local\\WinAirPlay.Native.v2", out var created);
-        if (!created) return 0;
+        if (!created)
+        {
+            if (!args.Contains("--startup")) WindowsIntegration.ShowExistingWindow();
+            return 0;
+        }
         ApplicationConfiguration.Initialize();
         Application.Run(new MainForm());
         return 0;

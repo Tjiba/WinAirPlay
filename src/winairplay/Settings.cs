@@ -8,6 +8,8 @@ internal sealed class Settings
     public string ReceiverId { get; set; } = "";
     public int TargetMs { get; set; } = 100;
     public int Volume { get; set; } = 50;
+    public bool SharedVolume { get; set; } = true;
+    public Dictionary<string, int> ReceiverVolumes { get; set; } = [];
     public bool StartMinimized { get; set; }
     public bool MinimizeOnClose { get; set; } = true;
     public static string Folder => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinAirPlay");

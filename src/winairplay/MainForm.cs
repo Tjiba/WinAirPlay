@@ -17,7 +17,10 @@ internal sealed class MainForm : Form
     private readonly NotifyIcon tray = new() { Text = "WinAirPlay 2", Icon = SystemIcons.Application, Visible = true };
     private readonly List<Receiver> manualReceivers = [];
     private readonly FlowLayoutPanel cards = new() { Dock = DockStyle.Fill, AutoScroll = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
-    private readonly Label deviceCount = new() { AutoSize = true, ForeColor = Theme.Muted };
+    private readonly TableLayoutPanel layout = new() { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5 };
+    private readonly TableLayoutPanel volumePanel = new() { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 2 };
+    private readonly ToolTip hints = new();
+    private Button? stopAll;
     private sealed class Connection(Receiver receiver, AirPlaySession session)
     {
         public Receiver Receiver { get; } = receiver;
@@ -41,15 +44,17 @@ internal sealed class MainForm : Form
     {
         logWriter = Task.Run(WriteLogs);
         Text = "WinAirPlay 2 — native audio";
-        ClientSize = new Size(480, 660);
+        ClientSize = new Size(370, 450);
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         BackColor = Theme.Background;
         ForeColor = Theme.Text;
         KeyPreview = true;
         KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) Hide(); };
-        StartPosition = FormStartPosition.CenterScreen;
+        StartPosition = FormStartPosition.Manual;
+        Load += (_, _) => { ResizeDashboard(); PositionPopup(); };
         Font = new Font("Segoe UI", 10);
+        DoubleBuffered = true;
         Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application;
         tray.Icon = Icon;
         BuildDashboard();
@@ -57,15 +62,15 @@ internal sealed class MainForm : Form
         volume.Value = Math.Clamp(settings.Volume, 0, 100);
         volume.ValueChanged += (_, _) =>
         {
-            foreach (var connection in connections.Values) connection.Session.Volume = volume.Value;
+            if (settings.SharedVolume)
+                foreach (var connection in connections.Values) connection.Session.Volume = volume.Value;
             SaveSettings();
         };
         var menu = new ContextMenuStrip { Renderer = new DarkMenuRenderer(), BackColor = Theme.Background, ForeColor = Theme.Text };
         menu.Opening += (_, _) => PopulateMenu(menu);
         tray.ContextMenuStrip = menu;
-        // MouseClick suppresses the second click of a double-click; MouseDown does not.
-        tray.MouseDown += (_, e) => { if (e.Button == MouseButtons.Left) { if (Visible) Hide(); else ShowPopup(); } };
-        status.TextChanged += (_, _) => { tray.Text = ("WinAirPlay — " + status.Text)[..Math.Min(63, 13 + status.Text.Length)]; RefreshCards(); };
+        tray.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) ShowPopup(); };
+        status.TextChanged += (_, _) => { tray.Text = ("WinAirPlay — " + status.Text)[..Math.Min(63, 13 + status.Text.Length)]; hints.SetToolTip(status, status.Text); RefreshCards(); };
         Resize += (_, _) => { if (WindowState == FormWindowState.Minimized) Hide(); };
         discovery.Changed += found => Ui(() => UpdateReceivers(found));
         discovery.Error += error => Log("Discovery: " + error);
@@ -75,7 +80,7 @@ internal sealed class MainForm : Form
             try
             {
                 foreach (var input in NativeAudio.Devices()) inputs.Items.Add(input);
-                inputs.SelectedItem = inputs.Items.Cast<AudioEndpoint>().FirstOrDefault(input => input.Id == settings.EndpointId) ?? inputs.Items[0];
+                inputs.SelectedItem = inputs.Items.Cast<AudioEndpoint>().FirstOrDefault(input => input.Id == settings.EndpointId) ?? inputs.Items.Cast<AudioEndpoint>().FirstOrDefault();
                 discovery.Start();
                 if (settings.StartMinimized) BeginInvoke(() => Hide());
             }
@@ -84,86 +89,147 @@ internal sealed class MainForm : Form
         FormClosing += OnClosing;
         FormClosed += (_, _) =>
         {
-            discovery.Dispose(); tray.Dispose(); menu.Dispose();
+            discovery.Dispose(); tray.Dispose(); menu.Dispose(); hints.Dispose();
             logQueue.Writer.TryComplete(); logWriter.Wait(1000);
         };
     }
 
     private void BuildDashboard()
     {
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(24), ColumnCount = 1, RowCount = 7 };
-        foreach (var height in new[] { 84, 42, 32, 0, 30, 76, 42 })
+        layout.Padding = new Padding(22, 16, 22, 12);
+        foreach (var height in new[] { 58, 28, 0, 70, 44 })
             layout.RowStyles.Add(new RowStyle(height == 0 ? SizeType.Percent : SizeType.Absolute, height == 0 ? 100 : height));
-        var header = new Panel { Dock = DockStyle.Fill };
-        var heading = new Label { Text = "WinAirPlay", Font = new Font("Segoe UI Semibold", 21), AutoSize = true, Location = new Point(0, 0) };
-        var subtitle = new Label { Text = "YOUR PC AUDIO, EVERY ROOM", ForeColor = Theme.Muted, Font = new Font("Segoe UI", 8), AutoSize = true };
-        header.Controls.Add(heading); header.Controls.Add(subtitle);
-        header.Layout += (_, _) => subtitle.Location = new Point(2, heading.Bottom + 4);
-        var hide = new Button { Text = "×", Width = 34, Height = 34, Location = new Point(390, 2), Anchor = AnchorStyles.Top | AnchorStyles.Right, FlatStyle = FlatStyle.Flat, ForeColor = Theme.Muted, Cursor = Cursors.Hand, Font = new Font("Segoe UI", 15) };
+        var header = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0) };
+        var heading = new Label { Text = "WinAirPlay", Font = new Font("Segoe UI Semibold", 18), AutoSize = true, Location = new Point(0, 7) };
+        header.Controls.Add(heading);
+        var hide = new Button { Text = "×", Width = 32, Height = 32, FlatStyle = FlatStyle.Flat, ForeColor = Theme.Muted, Cursor = Cursors.Hand, Font = new Font("Segoe UI", 14) };
         hide.FlatAppearance.BorderSize = 0; hide.Click += (_, _) => Hide(); header.Controls.Add(hide);
-        header.Resize += (_, _) => hide.Location = new Point(header.ClientSize.Width - hide.Width, 2);
+        hide.AccessibleName = "Hide window";
+        hints.SetToolTip(hide, "Hide window (Esc) — audio keeps playing");
+        header.Resize += (_, _) => hide.Location = new Point(header.ClientSize.Width - hide.Width, 7);
         layout.Controls.Add(header, 0, 0);
         status.ForeColor = Theme.Muted; status.Font = new Font("Segoe UI", 9); status.AutoEllipsis = true;
         status.AutoSize = false; status.TextAlign = ContentAlignment.MiddleLeft;
+        status.Margin = new Padding(0);
         layout.Controls.Add(status, 0, 1);
-        deviceCount.Text = "YOUR SPEAKERS"; deviceCount.Font = new Font("Segoe UI Semibold", 9);
-        layout.Controls.Add(deviceCount, 0, 2);
+        cards.Margin = new Padding(0);
         cards.Resize += (_, _) => ResizeCards();
-        layout.Controls.Add(cards, 0, 3);
-        var add = new LinkLabel { Text = "+ Add IP address", AutoSize = true, LinkColor = Theme.Muted, ActiveLinkColor = Theme.Accent, LinkBehavior = LinkBehavior.HoverUnderline, Margin = new Padding(0, 5, 0, 0) };
-        add.LinkClicked += (_, _) => AddReceiver(); layout.Controls.Add(add, 0, 4);
-        var volumePanel = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 2 };
-        volumePanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); volumePanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 60));
-        volumePanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 28)); volumePanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        volumePanel.Controls.Add(new Label { Text = "All speakers volume", AutoSize = true, ForeColor = Theme.Muted }, 0, 0);
-        var volumeLabel = new Label { Text = "50 %", AutoSize = true, ForeColor = Theme.Text };
+        cards.Layout += (_, _) => ResizeCards();
+        layout.Controls.Add(cards, 0, 2);
+        volumePanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); volumePanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));
+        volumePanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 26)); volumePanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        volumePanel.Controls.Add(new Label { Text = "Volume", AutoSize = true, ForeColor = Theme.Muted }, 0, 0);
+        var volumeLabel = new Label { Text = $"{settings.Volume} %", Dock = DockStyle.Fill, TextAlign = ContentAlignment.TopRight, ForeColor = Theme.Muted, Margin = new Padding(0) };
         volume.ValueChanged += (_, _) => volumeLabel.Text = $"{volume.Value} %";
         volumePanel.Controls.Add(volumeLabel, 1, 0);
-        volume.BackColor = Theme.Background;
+        volumePanel.Margin = new Padding(0, 8, 0, 0);
+        volume.Margin = new Padding(0);
+        volume.AccessibleName = "All speakers volume";
         volumePanel.Controls.Add(volume, 0, 1); volumePanel.SetColumnSpan(volume, 2);
-        layout.Controls.Add(volumePanel, 0, 5);
-        var footer = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
-        foreach (var (title, action) in new (string, Action)[] { ("Settings", OpenSettings), ("Logs", OpenLog), ("Quit", () => { exitRequested = true; Close(); }) })
+        layout.Controls.Add(volumePanel, 0, 3);
+        var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = new Padding(0, 8, 0, 0) };
+        foreach (var (title, action) in new (string, Action)[] { ("Settings", OpenSettings), ("Add", AddReceiver), ("Stop all", async () => await DisconnectAll()) })
         {
-            var button = new Button { Text = title, Width = 128, Height = 34, FlatStyle = FlatStyle.Flat, ForeColor = Theme.Muted, Cursor = Cursors.Hand, Margin = new Padding(0, 0, 14, 0) };
-            button.FlatAppearance.BorderColor = Theme.Border; button.FlatAppearance.MouseOverBackColor = Theme.Surface;
+            footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 3));
+            var button = new Button { Text = title, Dock = DockStyle.Fill, FlatStyle = FlatStyle.Flat, ForeColor = Theme.Muted, Cursor = Cursors.Hand, Margin = new Padding(0), Font = new Font("Segoe UI", 9) };
+            button.FlatAppearance.BorderSize = 0; button.FlatAppearance.MouseOverBackColor = Theme.Surface;
             button.Click += (_, _) => action(); footer.Controls.Add(button);
+            if (title == "Stop all")
+            {
+                stopAll = button; stopAll.Enabled = false;
+                stopAll.Paint += (_, e) =>
+                {
+                    if (button.Enabled) return;
+                    e.Graphics.Clear(Theme.Background);
+                    TextRenderer.DrawText(e.Graphics, button.Text, button.Font, button.ClientRectangle, Theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                };
+            }
         }
-        layout.Controls.Add(footer, 0, 6); Controls.Add(layout);
+        layout.Controls.Add(footer, 0, 4); Controls.Add(layout);
         RebuildCards();
     }
-
     private void OpenLog()
     {
         if (File.Exists(Settings.LogPath)) Process.Start(new ProcessStartInfo(Settings.LogPath) { UseShellExecute = true });
     }
     private void ShowPopup()
     {
+        PositionPopup();
+        RestoreWindow();
+    }
+    private void PositionPopup()
+    {
         var area = Screen.FromPoint(Cursor.Position).WorkingArea;
         Location = new Point(Math.Max(area.Left, area.Right - Width - 12), Math.Max(area.Top, area.Bottom - Height - 12));
-        RestoreWindow();
+    }
+    protected override void WndProc(ref Message message)
+    {
+        if (message.Msg == WindowsIntegration.ShowMessage) ShowPopup();
+        base.WndProc(ref message);
     }
     private void ResizeCards()
     {
-        foreach (Control card in cards.Controls) card.Width = Math.Max(100, cards.ClientSize.Width - 22);
+        var scrollWidth = cards.Controls.Cast<Control>().Sum(card => card.Height + card.Margin.Vertical) > cards.Height
+            ? SystemInformation.VerticalScrollBarWidth : 0;
+        var width = Math.Max(100, cards.Width - scrollWidth);
+        foreach (Control card in cards.Controls)
+            if (card.Width != width) card.Width = width;
+    }
+    private void ResizeDashboard()
+    {
+        var scale = DeviceDpi / 96f;
+        volumePanel.Visible = settings.SharedVolume;
+        layout.RowStyles[3].Height = settings.SharedVolume ? 70 * scale : 0;
+        var count = AvailableReceivers().Count;
+        var height = (158 + (settings.SharedVolume ? 70 : 0) + (count == 0 ? 120 : count * (settings.SharedVolume ? 72 : 108))) * scale;
+        var area = Screen.FromControl(this).WorkingArea;
+        ClientSize = new Size(Math.Min((int)(370 * scale), area.Width - 24), Math.Min((int)height, area.Height - 24));
+        using var outline = Theme.Rounded(new RectangleF(0, 0, Width, Height), 24 * scale);
+        var previous = Region;
+        Region = new Region(outline);
+        previous?.Dispose();
+        if (Visible) Location = new Point(Math.Max(area.Left, area.Right - Width - 12), Math.Max(area.Top, area.Bottom - Height - 12));
     }
     private void RebuildCards()
     {
         cards.SuspendLayout();
         while (cards.Controls.Count > 0) cards.Controls[0].Dispose();
         var items = AvailableReceivers();
-        deviceCount.Text = items.Count == 0 ? "YOUR SPEAKERS" : $"YOUR SPEAKERS  ·  {items.Count}";
         foreach (var receiver in items)
         {
-            var card = new ReceiverCard(receiver);
+            var card = new ReceiverCard(receiver, !settings.SharedVolume, ReceiverVolume(receiver));
             card.Selected += async selected => await ToggleConnection(selected);
+            card.VolumeChanged += SetReceiverVolume;
             cards.Controls.Add(card);
         }
-        if (items.Count == 0) cards.Controls.Add(new Label { Text = "Searching for AirPlay speakers…\n\nConnect your PC and speakers to the same network.", ForeColor = Theme.Muted, Height = 110, Padding = new Padding(14) });
-        ResizeCards(); RefreshCards(); cards.ResumeLayout();
+        if (items.Count == 0) cards.Controls.Add(new Label { Text = "No speakers found yet.\n\nConnect your PC and HomePods to the same network, or add an IP address below.", ForeColor = Theme.Muted, Height = (int)(120 * DeviceDpi / 96f), Margin = new Padding(0), Padding = new Padding(0, 12, 0, 0) });
+        ResizeDashboard(); ResizeCards(); RefreshCards(); cards.ResumeLayout(); ResizeCards();
+    }
+    private int ReceiverVolume(Receiver receiver) => settings.SharedVolume ? volume.Value
+        : Math.Clamp(settings.ReceiverVolumes.GetValueOrDefault(receiver.Id, volume.Value), 0, 100);
+
+    private void SetReceiverVolume(Receiver receiver, int value)
+    {
+        if (settings.SharedVolume) return;
+        value = Math.Clamp(value, 0, 100);
+        settings.ReceiverVolumes[receiver.Id] = value;
+        if (connections.TryGetValue(ReceiverKey(receiver), out var connection)) connection.Session.Volume = value;
+        SaveSettings();
+    }
+
+    private void SetVolumeMode(bool shared)
+    {
+        if (settings.SharedVolume == shared) return;
+        if (!shared)
+            foreach (var receiver in AvailableReceivers()) settings.ReceiverVolumes.TryAdd(receiver.Id, volume.Value);
+        settings.SharedVolume = shared;
+        foreach (var connection in connections.Values) connection.Session.Volume = ReceiverVolume(connection.Receiver);
+        RebuildCards();
+        SaveSettings();
     }
     private void RefreshCards()
     {
+        if (stopAll is not null) stopAll.Enabled = connections.Count > 0 && !closing;
         foreach (var card in cards.Controls.OfType<ReceiverCard>())
         {
             connections.TryGetValue(ReceiverKey(card.Receiver), out var connection);
@@ -197,9 +263,11 @@ internal sealed class MainForm : Form
         devices.DropDownItems.Add(new ToolStripSeparator());
         devices.DropDownItems.Add("Add IP address…", null, (_, _) => { RestoreWindow(); AddReceiver(); });
         menu.Items.Add(devices);
-        var levels = new ToolStripMenuItem($"Volume: {volume.Value} %");
+        var levels = new ToolStripMenuItem(settings.SharedVolume ? $"Volume: {volume.Value} %" : "Individual volumes…");
+        if (!settings.SharedVolume) levels.Click += (_, _) => ShowPopup();
         foreach (var value in new[] { 0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100 })
         {
+            if (!settings.SharedVolume) break;
             var item = new ToolStripMenuItem(value == 0 ? "Mute" : $"{value} %") { Checked = volume.Value == value };
             item.Click += (_, _) => volume.Value = value;
             levels.DropDownItems.Add(item);
@@ -229,8 +297,8 @@ internal sealed class MainForm : Form
     {
         using var dialog = new SettingsForm(inputs.Items.Cast<AudioEndpoint>().ToArray(),
             (inputs.SelectedItem as AudioEndpoint)?.Id ?? "", (int)delay.Value,
-            settings.StartMinimized, settings.MinimizeOnClose, connections.Count == 0);
-        if (dialog.ShowDialog() != DialogResult.OK) return;
+            settings.StartMinimized, settings.MinimizeOnClose, connections.Count == 0, settings.SharedVolume);
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
         if (connections.Count == 0)
         {
             inputs.SelectedItem = inputs.Items.Cast<AudioEndpoint>().FirstOrDefault(input => input.Id == dialog.EndpointId);
@@ -238,10 +306,11 @@ internal sealed class MainForm : Form
         }
         settings.StartMinimized = dialog.StartMinimized;
         settings.MinimizeOnClose = dialog.MinimizeOnClose;
+        SetVolumeMode(dialog.SharedVolume);
         SaveSettings();
     }
 
-    private void RestoreWindow() { Show(); WindowState = FormWindowState.Normal; Activate(); }
+    private void RestoreWindow() { Show(); WindowState = FormWindowState.Normal; BringToFront(); WindowsIntegration.SetForegroundWindow(Handle); Activate(); }
     private void Ui(Action action)
     {
         if (IsDisposed || !IsHandleCreated) return;
@@ -282,20 +351,36 @@ internal sealed class MainForm : Form
     }
     private void AddReceiver()
     {
-        using var dialog = new Form { Text = "AirPlay speaker", ClientSize = new Size(360, 125), StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false };
-        var host = new TextBox { Left = 15, Top = 15, Width = 230, PlaceholderText = "IPv4 address" };
-        var port = new NumericUpDown { Left = 255, Top = 15, Width = 85, Minimum = 1, Maximum = 65535, Value = 7000 };
-        var button = new Button { Text = "Add", Left = 240, Top = 65, Width = 100 };
+        using var dialog = new Form { Text = "Add an AirPlay speaker", ClientSize = new Size(400, 180), Font = Font, ShowInTaskbar = false, StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(20), ColumnCount = 2, RowCount = 4 };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
+        foreach (var height in new[] { 26, 40, 30, 44 }) layout.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
+        var host = new TextBox { Dock = DockStyle.Fill, PlaceholderText = "e.g. 192.168.1.15", AccessibleName = "IP address" };
+        var port = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 1, Maximum = 65535, Value = 7000, AccessibleName = "Port" };
+        layout.Controls.Add(new Label { Text = "IP address", AutoSize = true }, 0, 0);
+        layout.Controls.Add(new Label { Text = "Port", AutoSize = true }, 1, 0);
+        layout.Controls.Add(host, 0, 1); layout.Controls.Add(port, 1, 1);
+        var error = new Label { Dock = DockStyle.Fill, AutoEllipsis = true };
+        layout.Controls.Add(error, 0, 2); layout.SetColumnSpan(error, 2);
+        var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, Margin = new Padding(0) };
+        var button = new Button { Text = "Add", Size = new Size(92, 34) };
+        var cancel = new Button { Text = "Cancel", Size = new Size(92, 34), DialogResult = DialogResult.Cancel };
+        buttons.Controls.Add(button); buttons.Controls.Add(cancel);
+        layout.Controls.Add(buttons, 0, 3); layout.SetColumnSpan(buttons, 2);
         button.Click += (_, _) =>
         {
             if (!IPAddress.TryParse(host.Text, out var address) || address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
-            { MessageBox.Show(dialog, "Enter a valid IPv4 address."); return; }
+            { error.Text = "Enter a valid IPv4 address."; host.Focus(); return; }
+            if (AvailableReceivers().Any(receiver => receiver.Host == address.ToString() && receiver.Port == (int)port.Value))
+            { error.Text = "This speaker is already in the list."; return; }
             var item = new Receiver(address + ":" + port.Value, "AirPlay", address.ToString(), (int)port.Value);
             manualReceivers.Add(item);
             receivers.Items.Add(item); receivers.SelectedItem = item; RebuildCards();
             dialog.DialogResult = DialogResult.OK;
         };
-        dialog.Controls.AddRange([host, port, button]); dialog.AcceptButton = button; Theme.Apply(dialog); dialog.ShowDialog(this);
+        dialog.Controls.Add(layout); dialog.AcceptButton = button; dialog.CancelButton = cancel; Theme.Apply(dialog);
+        error.ForeColor = Theme.Muted; button.BackColor = Theme.Accent; button.ForeColor = Theme.Background;
+        dialog.ShowDialog(this);
     }
     private static string ReceiverKey(Receiver receiver) => receiver.Host + ":" + receiver.Port;
     private List<Receiver> AvailableReceivers() => receivers.Items.Cast<Receiver>()
@@ -330,7 +415,7 @@ internal sealed class MainForm : Form
         { status.Text = "Choose an audio output in Settings."; return; }
         receivers.SelectedItem = receiver;
         SaveSettings();
-        var session = new AirPlaySession(receiver, input.Id, (int)delay.Value, volume.Value,
+        var session = new AirPlaySession(receiver, input.Id, (int)delay.Value, ReceiverVolume(receiver),
             message => Log($"[{receiver.Name} · {receiver.Host}] {message}"));
         var current = new Connection(receiver, session);
         connections.Add(key, current);

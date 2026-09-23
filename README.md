@@ -14,12 +14,21 @@ pyatv or external audio process is required.
 Multiple speakers can play simultaneously. **Disconnect** stops only that
 speaker; **Disconnect all** in the tray menu stops every connection, including
 pending ones. Failed or cancelled connections do not stop other speakers.
-The volume slider controls all connected speakers, without changing PC volume.
+The compact menu has a shared volume slider by default. In **Settings**, uncheck
+**Use the same volume for all HomePods** to show one slider per speaker, without
+changing PC volume. Individual levels and the selected mode are saved. Returning
+to shared mode applies the global level to all sessions; switching back restores
+each speaker's individual level.
 
-A left click on the tray icon toggles the dark dashboard. A right click opens
+A left click on the tray icon opens or brings forward the dark dashboard. A right click opens
 the quick menu. Closing or minimizing the window keeps playback running by
 default; use **Quit** to exit. Startup and close behavior are configurable in
 **Settings**. Disconnect all speakers before changing the source or latency.
+
+After building, run `./Install.ps1` to install under `%LOCALAPPDATA%/Programs/WinAirPlay`
+and add WinAirPlay to Windows Start search. Enable **Launch at Windows startup**
+in Settings to launch at sign-in. **Start minimized to the system tray** controls
+whether the window appears. Opening WinAirPlay again brings the existing window forward.
 
 The PC and speakers must share a network. Allow incoming mDNS, clock and
 retransmission traffic through Windows Firewall for the app executable.
