@@ -15,9 +15,21 @@ internal sealed class VolumeSlider : Control
             if (this.value == next) return;
             this.value = next;
             AccessibleDescription = $"{next} %";
+            AccessibilityNotifyClients(AccessibleEvents.ValueChange, -1);
             Invalidate(); ValueChanged?.Invoke(this, EventArgs.Empty);
         }
     }
+    protected override AccessibleObject CreateAccessibilityInstance() => new SliderAccessibleObject(this);
+    private sealed class SliderAccessibleObject(VolumeSlider slider) : ControlAccessibleObject(slider)
+    {
+        public override string? Value
+        {
+            get => slider.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            set { if (int.TryParse(value, out var level)) slider.Value = level; }
+        }
+    }
+    protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+    protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
     public VolumeSlider()
     {
         DoubleBuffered = true; TabStop = true;

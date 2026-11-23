@@ -71,6 +71,14 @@ public sealed class NativeAudio : IDisposable
         }
         return result;
     }
+    public static string DefaultDeviceId()
+    {
+        var id = new char[1024];
+        var result = wa_default_device(id, (uint)id.Length);
+        if (result < 0) throw new IOException("Unable to read the default WASAPI output");
+        return result == 0 ? "" : new string(id).TrimEnd('\0');
+    }
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)] private static extern int wa_default_device([Out] char[] id, uint size);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] public static extern uint wa_version();
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)] private static extern IntPtr wa_create(string? deviceId);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] private static extern int wa_start(IntPtr engine);

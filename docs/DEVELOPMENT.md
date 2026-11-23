@@ -8,6 +8,13 @@
 - `native`: WASAPI capture on an MMCSS thread, preallocated PCM buffer and
   gradual drift correction using a 64-tap windowed sinc interpolator.
 
+Discovery reads the `am` or `model` TXT field from mDNS services. HomePod mini
+models are `AudioAccessory5,1` and `AudioAccessorySingle5,1`; HomePod models are
+`AudioAccessory1,1`, `AudioAccessory1,2` and `AudioAccessory6,1`. Missing RAOP
+model data can be resolved from an AirPlay service with the same host and port.
+Unknown models use a generic illustration rather than guessing from room names.
+The two HomePod illustrations are embedded resources in the executable.
+
 Each packet contains 352 frames, approximately 8 ms of audio. The sender uses
 QPC and a high-resolution Windows timer. Startup waits for captured samples
 rather than assuming a fixed sleep filled the buffer. Silent rendering keeps
@@ -36,7 +43,7 @@ bundling its native DLL and .NET runtime into one executable, plus a ZIP with th
 publishing. Builds do not connect to speakers.
 
 ```powershell
-# Protocol tests, without network or audio capture
+# Protocol tests, with a local loopback RTSP stub and no audio capture
 dotnet run --project tests/WinAirPlay.Tests -c Release
 
 # Ten seconds of WASAPI capture, without recording or transmission
@@ -90,6 +97,10 @@ For UI and volume regression checks without playback:
 
 ```powershell
 dotnet run --project tests/WinAirPlay.UiTests -c Release -- --window
+# Repeat at 96 DPI
+dotnet run --project tests/WinAirPlay.UiTests -c Release -- --window-96
 ```
 
-The UI test briefly opens windows and restores saved settings after normal completion. It does not establish audible receiver quality.
+The UI test briefly opens windows and restores saved settings after normal completion. It covers volume persistence and mute restoration, accessibility values, manual speaker editing/removal, language changes, close behavior, retry backoff/cancellation and simulated suspend/resume. Failed connection tests use loopback addresses, without transmitting audio. It does not establish audible receiver quality or validate an actual Windows sleep cycle.
+
+The protocol suite also checks a volume change made while an RTSP request is in flight, using a loopback server, and discovery expiration without incoming packets. Before shipping, test a real network outage, default audio output change and sleep/resume with speakers, including cancellation while reconnecting and displays with different DPI settings.

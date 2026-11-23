@@ -217,6 +217,25 @@ private:
 };
 
 API uint32_t wa_version() { return 2; }
+API int wa_default_device(wchar_t* id, uint32_t size) {
+    Apartment apartment;
+    if (FAILED(apartment.result) && apartment.result != RPC_E_CHANGED_MODE) return -1;
+    ComPtr<IMMDeviceEnumerator> enumerator;
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+        __uuidof(IMMDeviceEnumerator), enumerator.address());
+    if (FAILED(hr)) return -1;
+    ComPtr<IMMDevice> device;
+    hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device.value);
+    if (hr == E_NOTFOUND) return 0;
+    if (FAILED(hr)) return -1;
+    LPWSTR deviceId = nullptr;
+    hr = device->GetId(&deviceId);
+    if (FAILED(hr)) return -1;
+    bool fits = id && wcslen(deviceId) < size;
+    if (fits) wcscpy_s(id, size, deviceId);
+    CoTaskMemFree(deviceId);
+    return fits ? 1 : -1;
+}
 API int wa_prime(Engine* engine, uint32_t frames, uint32_t timeout) {
     return engine ? engine->prime(frames, timeout) : -1;
 }

@@ -4,7 +4,7 @@
         <TargetFramework>net8.0-windows</TargetFramework>
         <UseWindowsForms>true</UseWindowsForms>
         <ApplicationIcon>../../assets/WinAirPlay.ico</ApplicationIcon>
-        <Version>2.0.0</Version>
+        <Version>2.1.0</Version>
         <Product>WinAirPlay</Product>
         <Description>Stream Windows audio to AirPlay speakers.</Description>
         <Copyright>Copyright (c) 2026 Timo</Copyright>
@@ -13,5 +13,7 @@
     <ItemGroup>
         <ProjectReference Include="../WinAirPlay.Core/WinAirPlay.Core.csproj" />
         <Content Include="../../native/bin/winairplay_audio.dll" Link="winairplay_audio.dll" CopyToOutputDirectory="PreserveNewest" />
+        <EmbeddedResource Include="../../assets/homepod.png" LogicalName="WinAirPlay.homepod.png" />
+        <EmbeddedResource Include="../../assets/homepod-mini.png" LogicalName="WinAirPlay.homepod-mini.png" />
     </ItemGroup>
 </Project>

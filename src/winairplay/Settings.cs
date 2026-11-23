@@ -1,4 +1,5 @@
 using System.Text.Json;
+using WinAirPlay.Core;
 
 namespace WinAirPlay;
 
@@ -12,6 +13,10 @@ internal sealed class Settings
     public Dictionary<string, int> ReceiverVolumes { get; set; } = [];
     public bool StartMinimized { get; set; }
     public bool MinimizeOnClose { get; set; } = true;
+    public bool AutoReconnect { get; set; } = true;
+    public bool FollowDefaultOutput { get; set; } = true;
+    public string Language { get; set; } = "en";
+    public List<Receiver> ManualReceivers { get; set; } = [];
     public static string Folder => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinAirPlay");
     public static string LogPath => Path.Combine(Folder, "native-v2.log");
     private static string FilePath => Path.Combine(Folder, "settings-v2.json");

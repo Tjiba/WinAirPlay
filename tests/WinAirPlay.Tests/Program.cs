@@ -2,6 +2,9 @@ using System.Buffers.Binary;
 using System.Numerics;
 using System.Security.Cryptography;
 using System.Text;
+using System.Reflection;
+using System.Net;
+using System.Net.Sockets;
 using WinAirPlay.Core;
 
 if (args.Length > 0 && args[0] is "--probe" or "--stream")
@@ -55,6 +58,92 @@ if (args.Length > 0 && args[0] == "--capture")
 
 var tests = new (string Name, Action Run)[]
 {
+    ("DNS TXT model and HomePod identification", () =>
+    {
+        byte[] Packet(params string[] fields)
+        {
+            using var output = new MemoryStream();
+            output.Write(new byte[] { 0, 0, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0 });
+            var question = DnsPacket.Query("speaker._raop._tcp.local", 16);
+            output.Write(question.AsSpan(12));
+            output.Write(new byte[] { 0, 0, 0, 120 });
+            var bytes = fields.SelectMany(field => new[] { (byte)Encoding.UTF8.GetByteCount(field) }.Concat(Encoding.UTF8.GetBytes(field))).ToArray();
+            output.Write(new byte[] { (byte)(bytes.Length >> 8), (byte)bytes.Length });
+            output.Write(bytes);
+            return output.ToArray();
+        }
+        foreach (var model in new[] { "AudioAccessory5,1", "AudioAccessorySingle5,1" })
+        {
+            var txt = DnsPacket.Parse(Packet("AM=" + model, "name=Salon")).Single();
+            Check(txt.Model == model && new Receiver("id", "Salon", "127.0.0.1", 7000) { Model = txt.Model }.Kind == SpeakerKind.HomePodMini, "mini model is independent of room name");
+        }
+        foreach (var model in new[] { "AudioAccessory1,1", "AudioAccessory1,2", "AudioAccessory6,1" })
+            Check(new Receiver("id", "Mini", "127.0.0.1", 7000) { Model = model }.Kind == SpeakerKind.HomePod, "full-size models keep full-size illustration");
+        Check(DnsPacket.Parse(Packet("model=AudioAccessory6,1")).Single().Model == "AudioAccessory6,1", "AirPlay model key supported");
+        Check(new Receiver("id", "HomePod mini", "127.0.0.1", 7000).Kind == SpeakerKind.Unknown, "room names never guess hardware");
+        Check(new Receiver("id", "Salon", "127.0.0.1", 7000) { Model = "AudioAccessory99,1" }.Kind == SpeakerKind.Unknown, "unrecognized future model uses generic illustration");
+        var malformed = Packet("am=AudioAccessory5,1");
+        malformed[^21] = 255;
+        Throws<InvalidDataException>(() => DnsPacket.Parse(malformed));
+    }),
+    ("Volume changed during request is sent on next pass", () =>
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var session = new AirPlaySession(new("test", "Test", "127.0.0.1", port), null, 100, 50, _ => { });
+        var flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        var rtsp = (RtspConnection)typeof(AirPlaySession).GetField("rtsp", flags)!.GetValue(session)!;
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var received = new List<string>();
+        var server = Task.Run(async () =>
+        {
+            using var client = await listener.AcceptTcpClientAsync(deadline.Token);
+            client.ReceiveTimeout = 4000;
+            using var stream = client.GetStream();
+            for (var i = 0; i < 2; i++)
+            {
+                var message = RtspConnection.ReadMessage(stream);
+                received.Add(Encoding.ASCII.GetString(message.Body));
+                if (i == 0) session.Volume = 70;
+                stream.Write("RTSP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n"u8);
+            }
+        });
+        rtsp.Connect("127.0.0.1", port, deadline.Token);
+        typeof(AirPlaySession).GetMethod("SendVolume", flags)!.Invoke(session, null);
+        var feedback = (Task)typeof(AirPlaySession).GetMethod("FeedbackLoop", flags)!.Invoke(session, null)!;
+        try
+        {
+            server.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+            Check(received.SequenceEqual(new[] { "volume: -15.00\r\n", "volume: -9.00\r\n" }), "latest volume reaches receiver after in-flight change");
+        }
+        finally { session.Cancel(); feedback.GetAwaiter().GetResult(); }
+    }),
+    ("Discovery expires records without receiving a packet", () =>
+    {
+        using var discovery = new Discovery();
+        var flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        var records = (Dictionary<string, (DnsRecord Record, DateTime Expires)>)typeof(Discovery).GetField("records", flags)!.GetValue(discovery)!;
+        var name = "test._raop._tcp.local";
+        records[name + "/33"] = (new(name, 33, 120, "speaker.local", 7000, null), DateTime.UtcNow.AddMinutes(1));
+        records["speaker.local/1"] = (new("speaker.local", 1, 120, null, 0, "127.0.0.1"), DateTime.UtcNow.AddMinutes(1));
+        IReadOnlyList<Receiver> found = [];
+        discovery.Changed += receivers => found = receivers;
+        var publish = typeof(Discovery).GetMethod("Publish", flags)!;
+        publish.Invoke(discovery, null);
+        Check(found.Count == 1, "complete discovery records produce a speaker");
+        records[name + "/16"] = (new(name, 16, 120, null, 0, null) { Model = "AudioAccessory5,1" }, DateTime.UtcNow.AddMinutes(1));
+        publish.Invoke(discovery, null);
+        Check(found.Single().Kind == SpeakerKind.HomePodMini, "TXT arriving later updates discovered speaker model");
+        records.Remove(name + "/16");
+        records["airplay._airplay._tcp.local/33"] = (new("airplay._airplay._tcp.local", 33, 120, "SPEAKER.LOCAL", 7000, null), DateTime.UtcNow.AddMinutes(1));
+        records["airplay._airplay._tcp.local/16"] = (new("airplay._airplay._tcp.local", 16, 120, null, 0, null) { Model = "AudioAccessory6,1" }, DateTime.UtcNow.AddMinutes(1));
+        publish.Invoke(discovery, null);
+        Check(found.Single().Kind == SpeakerKind.HomePod, "AirPlay TXT fallback matches the same host and port");
+        records[name + "/33"] = (records[name + "/33"].Record, DateTime.UtcNow.AddSeconds(-1));
+        publish.Invoke(discovery, null);
+        Check(found.Count == 0, "timer publication removes expired speaker without traffic");
+    }),
     ("TLV fragments et troncature", () =>
     {
         var value = RandomNumberGenerator.GetBytes(700);

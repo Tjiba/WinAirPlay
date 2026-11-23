@@ -27,6 +27,7 @@ public sealed class AirPlaySession(Receiver receiver, string? endpointId, int ta
     private byte[] audioKey = [];
     private int controlPort;
     private int volume = initialVolume;
+    private int sentVolume = -1;
     private uint latencyFrames;
     private long retransmits;
     private long retransmitRequests;
@@ -129,7 +130,9 @@ public sealed class AirPlaySession(Receiver receiver, string? endpointId, int ta
     private void OpenEvents(int port, byte[] secret)
     {
         events = new TcpClient { NoDelay = true };
-        events.ConnectAsync(receiver.Host, port, stop.Token).AsTask().GetAwaiter().GetResult();
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stop.Token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(5));
+        events.ConnectAsync(receiver.Host, port, timeout.Token).AsTask().GetAwaiter().GetResult();
         var channel = new HapStream(events.GetStream(),
             SrpClient.Derive(secret, "Events-Salt", "Events-Read-Encryption-Key"),
             SrpClient.Derive(secret, "Events-Salt", "Events-Write-Encryption-Key"));
@@ -300,17 +303,20 @@ public sealed class AirPlaySession(Receiver receiver, string? endpointId, int ta
         var level = Volatile.Read(ref volume);
         var db = level == 0 ? -144 : -30 + level * 0.3;
         rtsp.Request("SET_PARAMETER", Url, Encoding.ASCII.GetBytes("volume: " + db.ToString("F2", CultureInfo.InvariantCulture) + "\r\n"), "text/parameters");
+        sentVolume = level;
     }
     private async Task FeedbackLoop()
     {
-        var previous = Volatile.Read(ref volume);
+        var nextFeedback = Environment.TickCount64 + 1000;
         try
         {
             while (!stop.IsCancellationRequested)
             {
-                await Task.Delay(1000, stop.Token);
-                if (previous != Volatile.Read(ref volume)) { SendVolume(); previous = Volatile.Read(ref volume); }
+                await Task.Delay(50, stop.Token);
+                if (sentVolume != Volatile.Read(ref volume)) SendVolume();
+                if (Environment.TickCount64 < nextFeedback) continue;
                 rtsp.Request("POST", "/feedback");
+                nextFeedback = Environment.TickCount64 + 1000;
             }
         }
         catch (Exception error) { Fail("Control", error); }

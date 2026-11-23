@@ -5,19 +5,36 @@ namespace WinAirPlay;
 
 internal static class Theme
 {
-    public static readonly Color Background = Color.FromArgb(24, 26, 31);
-    public static readonly Color Surface = Color.FromArgb(36, 39, 46);
-    public static readonly Color Border = Color.FromArgb(53, 57, 67);
-    public static readonly Color Text = Color.FromArgb(241, 244, 250);
-    public static readonly Color Muted = Color.FromArgb(151, 161, 178);
-    public static readonly Color Accent = Color.FromArgb(93, 155, 255);
-    public static readonly Color Green = Color.FromArgb(93, 214, 157);
+    public static readonly Color Background = Color.FromArgb(32, 34, 32);
+    public static readonly Color Surface = Color.FromArgb(40, 43, 40);
+    public static readonly Color Border = Color.FromArgb(64, 70, 62);
+    public static readonly Color Text = Color.FromArgb(241, 240, 233);
+    public static readonly Color Muted = Color.FromArgb(168, 172, 163);
+    public static readonly Color Accent = Color.FromArgb(168, 188, 139);
+    public static readonly Color Green = Accent;
+    public static readonly Color Error = Color.FromArgb(245, 165, 115);
 
     public static void Apply(Control control)
     {
+        control.Text = Texts.Get(control.Text);
         control.BackColor = control is TextBox or ComboBox or NumericUpDown ? Surface : Background;
         control.ForeColor = Text;
-        if (control is ComboBox combo) combo.FlatStyle = FlatStyle.Flat;
+        if (control is ComboBox combo)
+        {
+            combo.FlatStyle = FlatStyle.Flat;
+            combo.DrawMode = DrawMode.OwnerDrawFixed;
+            combo.DrawItem += (_, e) =>
+            {
+                using var background = new SolidBrush((e.State & DrawItemState.Selected) != 0 ? Border : Surface);
+                e.Graphics.FillRectangle(background, e.Bounds);
+                var text = e.Index >= 0 ? combo.GetItemText(combo.Items[e.Index]) : combo.Text;
+                TextRenderer.DrawText(e.Graphics, text, combo.Font, e.Bounds, combo.Enabled ? Text : Muted,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                e.DrawFocusRectangle();
+            };
+        }
+        if (control is ScrollableControl or ComboBox or NumericUpDown)
+            control.HandleCreated += (_, _) => SetWindowTheme(control.Handle, "DarkMode_Explorer", null);
         if (control is Button button)
         {
             button.FlatStyle = FlatStyle.Flat;
@@ -47,6 +64,8 @@ internal static class Theme
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref int value, int size);
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+    private static extern int SetWindowTheme(IntPtr window, string theme, string? subId);
 }
 
 internal sealed class DarkMenuRenderer : ToolStripProfessionalRenderer
