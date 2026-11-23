@@ -17,7 +17,7 @@ Requires Windows 10 or 11, 64-bit Intel/AMD. Allow WinAirPlay through Windows Fi
 
 The executable is not code-signed. Windows may display an unknown-publisher warning.
 
-For a Start menu shortcut, download **WinAirPlay-win-x64.zip**, extract everything, then double-click **Install.cmd**. This installs for your Windows account without administrator access. Quit an existing copy before updating.
+For installation, download **WinAirPlay-win-x64.zip**, extract everything, then double-click **Install.cmd**. This installs for your Windows account without administrator access, adds a Start menu shortcut and registers WinAirPlay in **Settings → Apps → Installed apps**. Quit an existing copy before updating; running **Install.cmd** again replaces the app and preserves saved settings. Opening the standalone executable alone does not register an installation.
 
 ## Everyday controls
 
@@ -60,7 +60,7 @@ Multiple speakers use independent connections. They can play together, but this 
 
 ## Remove WinAirPlay
 
-Turn off **Launch at Windows startup**, choose **Quit**, then delete the portable executable or the installed folder at `%LOCALAPPDATA%\Programs\WinAirPlay`. If installed, remove the WinAirPlay shortcut from the Start menu. Delete `%LOCALAPPDATA%\WinAirPlay` only if you also want to remove saved settings and logs.
+Choose **Quit**, then open **Windows Settings → Apps → Installed apps → WinAirPlay → Uninstall**. Uninstallation removes the app, Start menu shortcut and startup entry, while preserving saved settings and logs. For a portable copy, turn off **Launch at Windows startup**, quit and delete the executable. Delete `%LOCALAPPDATA%\WinAirPlay` only if you also want to remove saved settings and logs.
 
 ## Development
 

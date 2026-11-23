@@ -86,7 +86,7 @@ from Git.
 `./Build.ps1` produces three release assets:
 
 - `dist/WinAirPlay.exe`: standalone Windows x64 app.
-- `dist/WinAirPlay-win-x64.zip`: the app, license, README and optional Start menu installer.
+- `dist/WinAirPlay-win-x64.zip`: the app, license, README, per-user installer and uninstaller.
 - `dist/SHA256SUMS.txt`: SHA-256 checksums for both downloads.
 
 The runtime extracts bundled native components to the normal .NET bundle cache on first launch. No DLL needs to sit beside the executable. Signing requires a publisher certificate; the build does not sign binaries.
@@ -104,3 +104,5 @@ dotnet run --project tests/WinAirPlay.UiTests -c Release -- --window-96
 The UI test briefly opens windows and restores saved settings after normal completion. It covers volume persistence and mute restoration, accessibility values, manual speaker editing/removal, language changes, close behavior, retry backoff/cancellation and simulated suspend/resume. Failed connection tests use loopback addresses, without transmitting audio. It does not establish audible receiver quality or validate an actual Windows sleep cycle.
 
 The protocol suite also checks a volume change made while an RTSP request is in flight, using a loopback server, and discovery expiration without incoming packets. Before shipping, test a real network outage, default audio output change and sleep/resume with speakers, including cancellation while reconnecting and displays with different DPI settings.
+
+Installation registers WinAirPlay under `HKCU/Software/Microsoft/Windows/CurrentVersion/Uninstall/WinAirPlay`. The installed `Uninstall.ps1` removes the application, shortcut, startup value and uninstall registration; settings and logs remain. Standalone executable use remains portable.
