@@ -4,12 +4,12 @@ Play Windows audio on your HomePods and AirPlay speakers.
 
 A small app in your system tray, with a dark Studio interface and shared or individual volume controls.
 
-**[Download WinAirPlay.exe](https://github.com/Tjiba/WinAirPlay/releases/latest/download/WinAirPlay.exe)** · [All releases](https://github.com/Tjiba/WinAirPlay/releases)
+**[Download WinAirPlay-Setup.exe](https://github.com/Tjiba/WinAirPlay/releases/latest/download/WinAirPlay-Setup.exe)** · [All releases](https://github.com/Tjiba/WinAirPlay/releases)
 
 ## Get started
 
-1. Download **WinAirPlay.exe** and keep it in a permanent folder.
-2. Open it. No separate .NET installation or DLL is needed.
+1. Download **WinAirPlay-Setup.exe** and open it.
+2. Follow the graphical installer, then launch WinAirPlay from the Start menu. No separate .NET installation or DLL is needed.
 3. Connect your PC and speakers to the same local network.
 4. Click **Stream** next to a speaker. Repeat to play on more than one.
 
@@ -17,7 +17,9 @@ Requires Windows 10 or 11, 64-bit Intel/AMD. Allow WinAirPlay through Windows Fi
 
 The executable is not code-signed. Windows may display an unknown-publisher warning.
 
-For installation, download **WinAirPlay-win-x64.zip**, extract everything, then double-click **Install.cmd**. This installs for your Windows account without administrator access, adds a Start menu shortcut and registers WinAirPlay in **Settings → Apps → Installed apps**. Quit an existing copy before updating; running **Install.cmd** again replaces the app and preserves saved settings. Opening the standalone executable alone does not register an installation.
+The installer supports French and English, installs for your Windows account without administrator access, and adds WinAirPlay to **Settings → Apps → Installed apps**. To update, run the new installer; it offers to close the running app and preserves saved settings. No ZIP extraction or commands are needed.
+
+For portable use, download **WinAirPlay.exe** or the portable ZIP instead. These do not register an installation.
 
 ## Everyday controls
 

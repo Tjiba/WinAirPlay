@@ -4,7 +4,7 @@
         <TargetFramework>net8.0-windows</TargetFramework>
         <UseWindowsForms>true</UseWindowsForms>
         <ApplicationIcon>../../assets/WinAirPlay.ico</ApplicationIcon>
-        <Version>2.1.0</Version>
+        <Version>2.1.1</Version>
         <Product>WinAirPlay</Product>
         <Description>Stream Windows audio to AirPlay speakers.</Description>
         <Copyright>Copyright (c) 2026 Timo</Copyright>

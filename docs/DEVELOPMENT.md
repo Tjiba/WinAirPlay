@@ -83,11 +83,12 @@ from Git.
 
 ## Release packaging
 
-`./Build.ps1` produces three release assets:
+`./Build.ps1` produces four release assets:
 
+- `dist/WinAirPlay-Setup.exe`: graphical per-user installer with French and English UI, app registration and native uninstaller.
 - `dist/WinAirPlay.exe`: standalone Windows x64 app.
-- `dist/WinAirPlay-win-x64.zip`: the app, license, README, per-user installer and uninstaller.
-- `dist/SHA256SUMS.txt`: SHA-256 checksums for both downloads.
+- `dist/WinAirPlay-win-x64.zip`: portable app, license and README.
+- `dist/SHA256SUMS.txt`: SHA-256 checksums for all three downloads.
 
 The runtime extracts bundled native components to the normal .NET bundle cache on first launch. No DLL needs to sit beside the executable. Signing requires a publisher certificate; the build does not sign binaries.
 
@@ -105,4 +106,12 @@ The UI test briefly opens windows and restores saved settings after normal compl
 
 The protocol suite also checks a volume change made while an RTSP request is in flight, using a loopback server, and discovery expiration without incoming packets. Before shipping, test a real network outage, default audio output change and sleep/resume with speakers, including cancellation while reconnecting and displays with different DPI settings.
 
-Installation registers WinAirPlay under `HKCU/Software/Microsoft/Windows/CurrentVersion/Uninstall/WinAirPlay`. The installed `Uninstall.ps1` removes the application, shortcut, startup value and uninstall registration; settings and logs remain. Standalone executable use remains portable.
+The build uses `BuildInstaller.ps1` and `installer/WinAirPlay.iss` to compile the graphical installer. The Inno Setup 6.7.3 tool package is pinned by SHA-256 and its compiler signature is checked; tools remain inside ignored `build/toolchain`.
+
+Inno Setup installs per user under `%LOCALAPPDATA%/Programs/WinAirPlay` and registers `WinAirPlay_is1` under the current user's Uninstall key. Windows Restart Manager offers to close apps that lock installation files. Upgrades remove the legacy PowerShell uninstaller and old `WinAirPlay` uninstall entry after installation succeeds. Startup preferences are retained; uninstall removes startup and shortcuts, preserving user settings and logs. `Install.ps1` and `Uninstall.ps1` remain only for older packages.
+
+Run installer lifecycle checks without changing the normal installation:
+
+```powershell
+./tests/Installer.Tests.ps1
+```
